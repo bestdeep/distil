@@ -137,7 +137,13 @@ These are *untrained baselines* — purpose-built distillations should do signif
 git clone https://github.com/unarbos/distil.git
 cd distil
 pip install .
-python validator.py --netuid 97 --wallet-name YOUR_WALLET --hotkey-name YOUR_HOTKEY
+
+# Run via the wrapper script:
+bash scripts/run_validator.sh
+
+# Or with PM2 (recommended):
+pm2 start scripts/run_validator.sh --name distil-validator
+pm2 save
 ```
 
 If `pip install .` fails:
@@ -146,23 +152,6 @@ If `pip install .` fails:
 pip install "bittensor>=8.0.0" "bittensor-wallet>=2.0.0" "click>=8.0.0" \
     "transformers>=4.45.0" "huggingface-hub>=0.20.0" "numpy>=1.26.0" \
     "torch>=2.1.0" "safetensors>=0.4.0"
-```
-
-### Auto-Update
-
-Keep your validator up to date automatically:
-
-```bash
-# Run in background — checks for updates every 5 minutes, pulls and restarts
-nohup bash scripts/auto_update.sh &
-```
-
-Or with PM2:
-
-```bash
-pm2 start bash --name distil-autoupdate -- scripts/auto_update.sh
-pm2 start "python validator.py --netuid 97 --wallet-name YOUR_WALLET --hotkey-name YOUR_HOTKEY" --name distil-validator
-pm2 save
 ```
 
 ### What It Does
@@ -214,7 +203,7 @@ All endpoints are public, no authentication required.
 ├── api/
 │   └── server.py             # FastAPI dashboard backend
 ├── scripts/
-│   ├── pod_eval.py           # GPU eval runner (runs on remote pod)
+│   ├── pod_eval_vllm.py      # GPU eval runner (runs on remote pod, vLLM + HF fallback)
 │   ├── remote_validator.py   # King-of-the-hill validator (Hetzner + Lium GPU)
 │   └── run_validator.sh      # PM2 wrapper
 └── state/                    # Persistent scores, hashes, disqualifications

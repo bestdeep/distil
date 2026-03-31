@@ -539,25 +539,45 @@ def health():
     }
 
 
+import re as _re
+_ANSI_RE = _re.compile(r'\x1b\[[0-9;]*m')
+_SECRET_RE = _re.compile(r'hf_[a-zA-Z0-9]{6,}|sk-[a-zA-Z0-9]{6,}|key-[a-zA-Z0-9]{6,}')
+_SENSITIVE_KW = ("Authorization:", "Bearer ", "token=", "api_key=", "API_KEY=", "password", "secret")
+_INTERNAL_PATHS = ("/root/", "/home/pod/", "/home/openclaw/")
+_ALLOWED_PREFIXES = ("[GPU]", "[eval]", "[VALIDATOR]", "[pod_eval]", "[vLLM]", "[PHASE]", "[Cache]", "#")
+
+
+def _sanitize_log_line(line: str) -> str | None:
+    """Sanitize a single log line. Returns None if the line should be dropped."""
+    cleaned = _ANSI_RE.sub('', line).strip()
+    if not cleaned:
+        return None
+    if any(kw in cleaned for kw in _SENSITIVE_KW):
+        return None
+    if any(p in cleaned for p in _INTERNAL_PATHS):
+        return None
+    cleaned = _SECRET_RE.sub('[REDACTED]', cleaned)
+    return cleaned
+
+
 @app.get("/api/gpu-logs")
 def gpu_logs(lines: int = 50):
     """Stream recent GPU eval logs — combines pod output + validator events."""
     import subprocess
-    import re
-    ansi_re = re.compile(r'\x1b\[[0-9;]*m')
     max_lines = min(lines, 200)
     log_lines = []
 
-    # Source 1: Live GPU eval output from pod (streamed by poll thread)
+    # Source 1: Live GPU eval output from pod (streamed by poll thread, pre-sanitized)
     gpu_log_path = os.path.join(STATE_DIR, "gpu_eval.log")
     if os.path.exists(gpu_log_path):
         try:
             with open(gpu_log_path) as f:
                 pod_lines = f.read().strip().split('\n')
             for line in pod_lines:
-                cleaned = ansi_re.sub('', line).strip()
+                cleaned = _sanitize_log_line(line)
                 if cleaned:
-                    log_lines.append(f"[GPU] {cleaned}")
+                    prefixed = cleaned if any(cleaned.startswith(p) for p in _ALLOWED_PREFIXES) else f"[GPU] {cleaned}"
+                    log_lines.append(prefixed)
         except Exception:
             pass
 
@@ -569,18 +589,17 @@ def gpu_logs(lines: int = 50):
         )
         raw = result.stdout + result.stderr
         for line in raw.split('\n'):
-            cleaned = ansi_re.sub('', line)
+            cleaned = _ANSI_RE.sub('', line)
             if '|' in cleaned:
                 cleaned = cleaned.split('|', 1)[-1].strip()
             if not cleaned:
                 continue
-            if any(skip in cleaned for skip in [
-                'sftp', 'Authentication', 'Connected (version', 'chan 0',
-                'TAILING', 'last 50 lines', 'last 10 lines', 'last 20 lines',
-                'Opened sftp', 'sftp session closed', 'Enabling default logging'
-            ]):
+            # Only allow lines with known prefixes
+            if not any(cleaned.startswith(p) for p in _ALLOWED_PREFIXES):
                 continue
-            log_lines.append(cleaned)
+            sanitized = _sanitize_log_line(cleaned)
+            if sanitized:
+                log_lines.append(sanitized)
     except Exception:
         pass
 

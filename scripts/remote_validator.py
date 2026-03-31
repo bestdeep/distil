@@ -33,6 +33,36 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("distillation.remote_validator")
 logger.setLevel(logging.DEBUG)
 
+import re as _re
+
+# Patterns for sanitizing GPU logs before public exposure
+_ANSI_RE = _re.compile(r'\x1b\[[0-9;]*m')
+_SECRET_PATTERNS = _re.compile(r'hf_[a-zA-Z0-9]{6,}|sk-[a-zA-Z0-9]{6,}|key-[a-zA-Z0-9]{6,}')
+_SENSITIVE_KEYWORDS = ("Authorization:", "Bearer ", "token=", "api_key=", "API_KEY=", "password", "secret")
+
+
+def _sanitize_gpu_log(raw: str) -> str:
+    """Strip ANSI codes, secrets, and SSH noise from GPU pod logs before writing to disk."""
+    lines = []
+    for line in raw.splitlines():
+        cleaned = _ANSI_RE.sub('', line).strip()
+        if not cleaned:
+            continue
+        # Drop lines with sensitive keywords
+        if any(kw in cleaned for kw in _SENSITIVE_KEYWORDS):
+            continue
+        # Drop SSH/SFTP noise
+        if any(noise in cleaned for noise in (
+            "sftp", "Authentication", "Connected (version", "chan ",
+            "Opened sftp", "sftp session closed",
+        )):
+            continue
+        # Redact any token/key patterns
+        cleaned = _SECRET_PATTERNS.sub('[REDACTED]', cleaned)
+        lines.append(cleaned)
+    return '\n'.join(lines)
+
+
 TEACHER_MODEL = "Qwen/Qwen3.5-35B-A3B"
 NETUID = 97
 MAX_KL_THRESHOLD = 2.0
@@ -109,7 +139,7 @@ def _announce_new_king(new_uid, new_model, new_kl, old_uid, old_model, old_kl, s
 @click.option("--tempo", type=int, default=360, help="Seconds between epochs")
 @click.option("--once", is_flag=True, help="Run one epoch and exit (for testing)")
 @click.option("--use-vllm", is_flag=True, default=False, envvar="USE_VLLM",
-              help="Use vLLM-accelerated pod_eval_vllm.py instead of pod_eval.py")
+              help="Use vLLM-accelerated pod_eval_vllm.py instead of HF pod_eval")
 def main(network, netuid, wallet_name, hotkey_name, wallet_path,
          lium_api_key, lium_pod_name, state_dir, max_params_b, tempo, once, use_vllm):
     """Run the distillation validator with king-of-the-hill evaluation."""
@@ -273,9 +303,9 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
         return fixed_scores, fixed_evaluated, issues
 
     # ── Upload eval script (with retry — SFTP can be flaky on Lium pods) ──
-    eval_script = "scripts/pod_eval_vllm.py" if use_vllm else "scripts/pod_eval.py"
+    eval_script = "scripts/pod_eval_vllm.py"
     eval_script_remote = "/home/pod_eval.py"  # same remote name either way
-    print(f"[VALIDATOR] Eval script: {eval_script} ({'vLLM' if use_vllm else 'HF'})", flush=True)
+    print(f"[VALIDATOR] Eval script: {eval_script} (vLLM w/ HF fallback)", flush=True)
     for _upload_attempt in range(5):
         try:
             logger.info(f"Uploading eval script to pod (attempt {_upload_attempt + 1}/5)...")
@@ -732,7 +762,7 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                         raise RuntimeError(f"Failed to upload eval script after 5 attempts: {e}")
 
             # NEVER delete teacher_cache.pt or eval_results.json blindly.
-            # pod_eval.py checks the prompts hash inside teacher_cache.pt and
+            # pod_eval checks the prompts hash inside teacher_cache.pt and
             # --resume skips already-scored students. Let pod_eval handle
             # cache validity — it's the only thing that knows if the hash matches.
             try:
@@ -741,7 +771,7 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                     print("[VALIDATOR] Resuming round (keeping eval_results.json + teacher_cache.pt on pod)", flush=True)
                 else:
                     # New round: remove eval_results.json (scores from old prompts are invalid)
-                    # but KEEP teacher_cache.pt — pod_eval.py will check the prompts hash
+                    # but KEEP teacher_cache.pt — pod_eval checks the prompts hash
                     # and reuse it if prompts happen to match, or regenerate if they don't.
                     lium.exec(pod, command="rm -f /home/eval_results.json")
                     print("[VALIDATOR] New round (cleared eval_results.json, keeping teacher_cache.pt for hash check)", flush=True)
@@ -957,31 +987,31 @@ else:
                                 pod_phase = pod_progress.get("phase", "scoring")
                                 progress["phase"] = pod_phase
 
+                                _student_keys = ("current_student", "current_prompt", "current_kl")
+
                                 # Teacher phases (generation, logit extraction, cache load)
                                 if pod_phase in ("teacher_generation", "teacher_logits",
                                                  "teacher_loading", "vllm_starting",
                                                  "vllm_generating"):
                                     progress["teacher_prompts_done"] = pod_progress.get("teacher_prompts_done", 0)
                                     progress["prompts_total"] = pod_progress.get("prompts_total", n_prompts)
-                                    # Clear student fields during teacher phase
-                                    progress.pop("current_student", None)
-                                    progress.pop("current_prompt", None)
-                                    progress.pop("current_kl", None)
+                                    for k in _student_keys:
+                                        progress.pop(k, None)
 
                                 # Student scoring phase
                                 if pod_progress.get("current"):
                                     cur = pod_progress["current"]
-                                    progress["current_student"] = cur.get("student_name")
-                                    progress["current_prompt"] = cur.get("prompts_done", 0)
-                                    progress["current_kl"] = cur.get("kl_running_mean")
-                                    progress["current_se"] = cur.get("kl_running_se")
-                                    progress["current_ci"] = cur.get("ci_95")
-                                    progress["current_best"] = cur.get("best_kl_so_far")
+                                    progress.update({
+                                        "current_student": cur.get("student_name"),
+                                        "current_prompt": cur.get("prompts_done", 0),
+                                        "current_kl": cur.get("kl_running_mean"),
+                                        "current_se": cur.get("kl_running_se"),
+                                        "current_ci": cur.get("ci_95"),
+                                        "current_best": cur.get("best_kl_so_far"),
+                                    })
                                 elif pod_phase == "scoring":
-                                    # Scoring phase but no current student — between models
-                                    progress.pop("current_student", None)
-                                    progress.pop("current_prompt", None)
-                                    progress.pop("current_kl", None)
+                                    for k in _student_keys:
+                                        progress.pop(k, None)
 
                                 # Always update completed count
                                 pod_completed = pod_progress.get("completed", [])
@@ -993,12 +1023,12 @@ else:
                         except Exception:
                             pass
 
-                        # Fetch pod stdout log (last 100 lines)
+                        # Fetch pod stdout log (last 100 lines) and sanitize before writing
                         try:
                             log_result = lium.exec(pod, command="tail -100 /home/eval_output.log 2>/dev/null || echo ''")
                             log_text = log_result.get("stdout", "")
                             if log_text.strip():
-                                gpu_log_path.write_text(log_text)
+                                gpu_log_path.write_text(_sanitize_gpu_log(log_text))
                         except Exception:
                             pass
 
@@ -1008,7 +1038,7 @@ else:
                 poll_thread.start()
 
                 # Dynamic timeout: 10 min per model + 30 min buffer for teacher generation
-                # Per-model timeout (10 min) is enforced inside pod_eval.py; this is a safety net
+                # Per-model timeout (10 min) is enforced inside pod_eval; this is a safety net
                 n_eval_models = len(models_to_eval)
                 EVAL_TIMEOUT = (n_eval_models * 10 + 30) * 60
                 print(f"[VALIDATOR] Eval timeout: {EVAL_TIMEOUT//60}m ({n_eval_models} models × 10m + 30m buffer)", flush=True)

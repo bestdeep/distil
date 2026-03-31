@@ -42,7 +42,6 @@ def save_scores(scores: dict[str, float], state_dir: Path = STATE_DIR):
     _save_json(state_dir / "scores.json", scores)
 
 
-# Aliases for EMA-style access (validator.py uses these names)
 load_ema_scores = load_scores
 save_ema_scores = save_scores
 
