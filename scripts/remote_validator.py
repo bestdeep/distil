@@ -1663,7 +1663,10 @@ else:
                 _cb = commitments.get(uid, {}).get("block")
                 if is_disqualified(uid, hotkey, dq_reasons, commit_block=_cb):
                     continue
-                if uid_str in scores and 0 < scores[uid_str] <= MAX_KL_THRESHOLD:
+                # CRITICAL: Only include UIDs actually evaluated in THIS round.
+                # Using global scores would let stale scores from old prompt sets
+                # contaminate the H2H winner selection.
+                if uid_str in evaluated_uids and uid_str in scores and 0 < scores[uid_str] <= MAX_KL_THRESHOLD:
                     h2h_candidates.append((uid, scores[uid_str]))
 
             if h2h_candidates:
@@ -1677,10 +1680,11 @@ else:
                     winner_kl = scores.get(str(king_uid), king_kl)
                     print(f"[VALIDATOR] King UID {king_uid} retains crown (no challenger passed epsilon)", flush=True)
                 elif epsilon_dethroned_by is not None:
-                    # A challenger passed epsilon — they're the winner
+                    # A challenger passed the paired t-test — they're the winner
                     winner_uid = epsilon_dethroned_by
+                    # Use the score from THIS round (already in scores dict from evaluated_uids)
                     winner_kl = scores.get(str(epsilon_dethroned_by), best_kl)
-                    print(f"[VALIDATOR] UID {winner_uid} is new king (passed epsilon)", flush=True)
+                    print(f"[VALIDATOR] UID {winner_uid} is new king (paired t-test p<{PAIRED_TEST_ALPHA})", flush=True)
                 else:
                     winner_uid, winner_kl = best_uid, best_kl
             else:
