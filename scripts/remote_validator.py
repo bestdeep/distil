@@ -820,6 +820,29 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 print(f"  evaluated_uids: {len(evaluated_uids)}, scores: {len(scores)}, valid_models: {len(valid_models)}", flush=True)
                 # Don't block — just log the warning. The eval will handle it.
 
+            # ── Always include top-5 contenders in every round ──
+            # In maintenance mode, the top 4 contenders (from leaderboard) are always
+            # re-evaluated alongside any new challengers. This ensures:
+            # 1. Contenders can dethrone the king if they consistently beat it
+            # 2. New models are compared against the full competitive field
+            # 3. Cumulative dethronement has continuous data
+            TOP_N_ALWAYS_INCLUDE = 5  # king + 4 contenders
+            top4_file_inc = state_path / "top4_leaderboard.json"
+            if top4_file_inc.exists() and king_uid is not None:
+                try:
+                    t4_inc = json.loads(top4_file_inc.read_text())
+                    if t4_inc.get("phase") == "maintenance":
+                        contenders_added = 0
+                        for contender in (t4_inc.get("contenders") or [])[:TOP_N_ALWAYS_INCLUDE - 1]:
+                            c_uid = contender.get("uid")
+                            if c_uid is not None and c_uid != king_uid and c_uid in valid_models and c_uid not in challengers:
+                                challengers[c_uid] = valid_models[c_uid]
+                                contenders_added += 1
+                        if contenders_added:
+                            print(f"[VALIDATOR] \U0001f3c6 Added {contenders_added} top-{TOP_N_ALWAYS_INCLUDE} contender(s) to eval", flush=True)
+                except Exception as e:
+                    print(f"[VALIDATOR] Warning: failed to load top4 for contender inclusion: {e}", flush=True)
+
             if not challengers:
                 print(f"[VALIDATOR] No new challengers, king UID {king_uid} (KL={king_kl:.6f}) holds", flush=True)
                 # Still set weights periodically to keep tempo — use king directly
