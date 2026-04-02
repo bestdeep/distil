@@ -84,7 +84,8 @@ EVAL_PROMPTS_FULL = 60   # Full eval: many models, need speed
 EVAL_PROMPTS_H2H = 120   # Maintenance H2H: fewer models, need precision
 # Epsilon: challenger must beat king by this relative margin to dethrone
 # e.g., 0.01 = challenger KL must be < king_kl * 0.99 (1% better)
-EPSILON = 0.01
+EPSILON = 0.01  # Legacy — kept as fallback if per-prompt data unavailable
+PAIRED_TEST_ALPHA = 0.05  # Significance level for paired t-test dethronement
 # Cumulative dethronement: asymmetric penalty (caseus's proposal)
 # Win delta adds to score, loss delta subtracts × LOSS_PENALTY_MULTIPLIER
 # A copy randomly winning/losing drifts negative over time.
@@ -136,7 +137,7 @@ def _announce_new_king(new_uid, new_model, new_kl, old_uid, old_model, old_kl, s
             f"🤗 Model: [{new_model}](<https://huggingface.co/{new_model}>)\n"
             f"👑 Previous king: [{old_model}](<https://huggingface.co/{old_model}>)\n"
             f"{earnings_line}\n"
-            f"Think you can beat **{new_kl * (1 - EPSILON):.6f} KL** (1% epsilon)? "
+            f"Dethronement uses paired t-test (p<0.05) on 120 prompts. "
             f"Check the [mining guide](<https://github.com/unarbos/distil#mining-guide>) to get started.\n\n"
             f"📈 [Live Dashboard](<https://distil.arbos.life>)"
         ),
@@ -1575,34 +1576,77 @@ else:
                     reset_failures(uid, failures)
                     print(f"[VALIDATOR] UID {uid} ({model_name}): KL={kl:.6f}", flush=True)
 
-            # ── Epsilon enforcement + winner determination ──
-            # Challenger must beat king by >EPSILON to dethrone.
-            # Scores are NEVER mutated — epsilon is enforced in winner selection only.
-            # This preserves real scores for transparency on the dashboard.
-            #
-            # If king failed to eval this round, we MUST use the fresh scores
-            # from challengers only — the king retains crown by default.
+            # ── Paired t-test dethronement ──
+            # Instead of fixed epsilon, use per-prompt paired statistical test.
+            # For each prompt i, compute delta_i = king_kl_i - challenger_kl_i.
+            # If the mean delta is significantly > 0 (paired t-test, p < ALPHA),
+            # the challenger is genuinely better → dethrone.
+            # Falls back to legacy epsilon if per-prompt data unavailable.
+            from scipy import stats as _scipy_stats
+
             if king_uid is not None and king_h2h_kl is None:
                 print(f"[VALIDATOR] ⚠️ King UID {king_uid} did not produce a score this round — retaining crown by default", flush=True)
             king_new_kl = king_h2h_kl if king_h2h_kl is not None else scores.get(str(king_uid), king_kl) if king_uid else float("inf")
             epsilon_threshold = king_new_kl * (1.0 - EPSILON) if king_uid else float("inf")
             epsilon_dethroned_by = None  # Track which challenger dethroned king
 
+            # Extract per-prompt KL arrays from results
+            king_model_name = uid_to_model.get(king_uid)
+            king_per_prompt = None
+            if king_model_name and king_model_name in results.get("students", {}):
+                king_result = results["students"][king_model_name]
+                king_per_prompt = king_result.get("kl_per_prompt")
+
             if king_uid is not None and challengers:
                 for uid in challengers:
                     uid_str = str(uid)
-                    if uid_str in scores and 0 < scores[uid_str] <= MAX_KL_THRESHOLD:
-                        challenger_kl = scores[uid_str]
-                        if challenger_kl < epsilon_threshold:
+                    if uid_str not in scores or scores[uid_str] <= 0 or scores[uid_str] > MAX_KL_THRESHOLD:
+                        continue
+                    challenger_kl = scores[uid_str]
+                    challenger_model = uid_to_model.get(uid)
+                    challenger_per_prompt = None
+                    if challenger_model and challenger_model in results.get("students", {}):
+                        challenger_per_prompt = results["students"][challenger_model].get("kl_per_prompt")
+
+                    # Paired t-test if both have per-prompt data of same length
+                    if (king_per_prompt and challenger_per_prompt
+                            and len(king_per_prompt) == len(challenger_per_prompt)
+                            and len(king_per_prompt) >= 20):
+                        # delta_i = king_i - challenger_i; positive = challenger is better
+                        deltas = [k - c for k, c in zip(king_per_prompt, challenger_per_prompt)]
+                        mean_delta = sum(deltas) / len(deltas)
+                        # One-sided test: is mean_delta > 0? (challenger better)
+                        t_stat, p_two = _scipy_stats.ttest_1samp(deltas, 0.0)
+                        p_value = p_two / 2 if t_stat > 0 else 1.0 - p_two / 2  # one-sided
+                        n_prompts_test = len(deltas)
+                        pct_better = (mean_delta / king_new_kl * 100) if king_new_kl > 0 else 0
+
+                        if p_value < PAIRED_TEST_ALPHA and mean_delta > 0:
                             print(f"[VALIDATOR] UID {uid} DETHRONED king UID {king_uid}! "
-                                  f"KL={challenger_kl:.6f} < {epsilon_threshold:.6f} (king {king_new_kl:.6f} - {EPSILON*100:.0f}%)", flush=True)
+                                  f"Paired t-test: p={p_value:.6f} < {PAIRED_TEST_ALPHA}, "
+                                  f"mean_delta={mean_delta:.6f} ({pct_better:.2f}% better), "
+                                  f"t={t_stat:.3f}, n={n_prompts_test}", flush=True)
                             if epsilon_dethroned_by is None or challenger_kl < scores.get(str(epsilon_dethroned_by), float("inf")):
                                 epsilon_dethroned_by = uid
+                        elif mean_delta > 0:
+                            print(f"[VALIDATOR] UID {uid}: better than king but not significant "
+                                  f"(p={p_value:.4f}, need <{PAIRED_TEST_ALPHA}, "
+                                  f"delta={mean_delta:.6f}/{pct_better:.2f}%, t={t_stat:.3f}, n={n_prompts_test})", flush=True)
                         else:
+                            print(f"[VALIDATOR] UID {uid}: worse than king "
+                                  f"(delta={mean_delta:.6f}, p={p_value:.4f}, t={t_stat:.3f})", flush=True)
+                    else:
+                        # Fallback: legacy epsilon check (no per-prompt data)
+                        if challenger_kl < epsilon_threshold:
+                            print(f"[VALIDATOR] UID {uid} DETHRONED king UID {king_uid}! "
+                                  f"KL={challenger_kl:.6f} < {epsilon_threshold:.6f} "
+                                  f"(king {king_new_kl:.6f} - {EPSILON*100:.0f}%) [legacy epsilon — no per-prompt data]", flush=True)
+                            if epsilon_dethroned_by is None or challenger_kl < scores.get(str(epsilon_dethroned_by), float("inf")):
+                                epsilon_dethroned_by = uid
+                        elif challenger_kl < king_new_kl:
                             pct = ((king_new_kl - challenger_kl) / king_new_kl * 100) if king_new_kl > 0 else 0
-                            if challenger_kl < king_new_kl:
-                                print(f"[VALIDATOR] UID {uid}: better than king but within epsilon "
-                                      f"(KL={challenger_kl:.6f}, needed <{epsilon_threshold:.6f}, only {pct:.1f}% better)", flush=True)
+                            print(f"[VALIDATOR] UID {uid}: better than king but within epsilon "
+                                  f"(KL={challenger_kl:.6f}, needed <{epsilon_threshold:.6f}, only {pct:.1f}% better) [legacy]", flush=True)
 
             # ── Cumulative dethronement tracking (asymmetric penalty) ──
             # Only active in maintenance phase. Tracks cumulative score per
@@ -1817,22 +1861,44 @@ else:
                     continue
                 is_king = (uid == king_uid)
                 vs_king = ""
+                t_test_info = None
                 if king_h2h_kl is not None and not is_king and king_h2h_kl > 0:
                     pct = (king_h2h_kl - kl) / king_h2h_kl * 100
-                    epsilon_threshold = king_h2h_kl * (1.0 - EPSILON)
-                    if kl < epsilon_threshold:
-                        vs_king = f"-{pct:.3f}% (DETHRONED)"
-                    elif kl < king_h2h_kl:
-                        vs_king = f"-{pct:.3f}% (not enough, need >{EPSILON*100:.0f}%)"
+                    # Compute paired t-test if per-prompt data available
+                    c_per_prompt = student_data.get("kl_per_prompt")
+                    if (king_per_prompt and c_per_prompt
+                            and len(king_per_prompt) == len(c_per_prompt)
+                            and len(king_per_prompt) >= 20):
+                        deltas = [k - c for k, c in zip(king_per_prompt, c_per_prompt)]
+                        mean_d = sum(deltas) / len(deltas)
+                        t_s, p2 = _scipy_stats.ttest_1samp(deltas, 0.0)
+                        p_val = p2 / 2 if t_s > 0 else 1.0 - p2 / 2
+                        t_test_info = {"p": round(p_val, 6), "t": round(t_s, 3), "n": len(deltas), "mean_delta": round(mean_d, 6)}
+                        if p_val < PAIRED_TEST_ALPHA and mean_d > 0:
+                            vs_king = f"-{pct:.3f}% (p={p_val:.4f} DETHRONED)"
+                        elif mean_d > 0:
+                            vs_king = f"-{pct:.3f}% (p={p_val:.4f}, not significant)"
+                        else:
+                            vs_king = "worse"
                     else:
-                        vs_king = "worse"
-                h2h_results.append({
+                        # Legacy fallback
+                        epsilon_threshold_h2h = king_h2h_kl * (1.0 - EPSILON)
+                        if kl < epsilon_threshold_h2h:
+                            vs_king = f"-{pct:.3f}% (DETHRONED)"
+                        elif kl < king_h2h_kl:
+                            vs_king = f"-{pct:.3f}% (not enough, need >{EPSILON*100:.0f}%)"
+                        else:
+                            vs_king = "worse"
+                entry = {
                     "uid": uid,
                     "model": model_name,
                     "kl": round(kl, 6),
                     "is_king": is_king,
                     "vs_king": vs_king,
-                })
+                }
+                if t_test_info:
+                    entry["t_test"] = t_test_info
+                h2h_results.append(entry)
             h2h_results.sort(key=lambda x: x["kl"])
 
             # Don't save king-only rounds — they clutter the dashboard and mean
@@ -1853,6 +1919,8 @@ else:
                     "king_global_kl": round(king_kl, 6),
                     "epsilon": EPSILON,
                     "epsilon_threshold": round(king_h2h_kl * (1.0 - EPSILON), 6) if king_h2h_kl else None,
+                    "paired_test_alpha": PAIRED_TEST_ALPHA,
+                    "dethrone_method": "paired_t_test" if king_per_prompt else "legacy_epsilon",
                     "n_prompts": n_prompts,
                     "results": h2h_results,
                     "king_changed": king_changed,
