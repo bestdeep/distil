@@ -70,10 +70,16 @@ MAX_NEW_TOKENS = 512
 MAX_PROMPT_TOKENS = 1024
 
 # Prompts per head-to-head evaluation (king + challenger on same prompts)
-EVAL_PROMPTS = 60
+# Bumped from 60 → 120 to halve variance (per Arbos: "I could bump to 120+ without much pain")
+EVAL_PROMPTS = 120
 # Epsilon: challenger must beat king by this relative margin to dethrone
 # e.g., 0.01 = challenger KL must be < king_kl * 0.99 (1% better)
 EPSILON = 0.01
+
+# Re-challenge: every N epochs, re-evaluate top historical models against the king.
+# This catches models that were scored on different prompt sets and may actually be better.
+RE_CHALLENGE_INTERVAL = 30  # epochs between periodic re-challenges
+RE_CHALLENGE_TOP_N = 3  # how many top models to re-challenge
 
 
 def _announce_new_king(new_uid, new_model, new_kl, old_uid, old_model, old_kl, state_dir):
@@ -651,6 +657,62 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 print(f"[VALIDATOR] Skipped {skipped_permanently_bad} permanently bad models (>10x king KL historically)", flush=True)
             if skipped_known_bad:
                 print(f"[VALIDATOR] Skipped {skipped_known_bad} models with historically bad scores (>2x king KL)", flush=True)
+
+            # ── Periodic re-challenge: re-evaluate top historical models ──
+            # Models are scored once and never re-evaluated against a new king on
+            # fresh prompts. Every RE_CHALLENGE_INTERVAL epochs, force the top N
+            # historically best models back into the challenger pool.
+            rechallenge_history_file = state_path / "rechallenge_history.json"
+            rechallenge_history = {}
+            if rechallenge_history_file.exists():
+                try:
+                    rechallenge_history = json.loads(rechallenge_history_file.read_text())
+                except Exception:
+                    pass
+
+            if epoch_count > 0 and epoch_count % RE_CHALLENGE_INTERVAL == 0 and king_uid is not None:
+                # Find top N models from history (lowest best_kl, excluding current king)
+                king_model_name = valid_models.get(king_uid, {}).get("model", "")
+                candidates = []
+                for model_name, hist in model_score_history.items():
+                    if model_name == king_model_name:
+                        continue
+                    best_kl = hist.get("best_kl")
+                    if best_kl is not None and best_kl < float("inf"):
+                        candidates.append((model_name, best_kl))
+                candidates.sort(key=lambda x: x[1])
+                rechallenge_models = candidates[:RE_CHALLENGE_TOP_N]
+
+                if rechallenge_models:
+                    print(f"[VALIDATOR] \U0001f504 PERIODIC RE-CHALLENGE (epoch {epoch_count}): "
+                          f"re-evaluating top {len(rechallenge_models)} historical models", flush=True)
+                    rechallenge_added = 0
+                    for rc_model_name, rc_best_kl in rechallenge_models:
+                        # Find a UID currently hosting this model
+                        rc_uid = None
+                        for uid, info in valid_models.items():
+                            if info["model"] == rc_model_name and uid not in challengers:
+                                rc_uid = uid
+                                break
+                        if rc_uid is not None:
+                            challengers[rc_uid] = valid_models[rc_uid]
+                            rechallenge_added += 1
+                            print(f"[VALIDATOR] \U0001f504 PERIODIC RE-CHALLENGE: "
+                                  f"Re-evaluating {rc_model_name} (UID {rc_uid}, best_kl={rc_best_kl:.4f})", flush=True)
+                            # Track re-challenge in history
+                            if rc_model_name not in rechallenge_history:
+                                rechallenge_history[rc_model_name] = []
+                            rechallenge_history[rc_model_name].append({
+                                "epoch": epoch_count,
+                                "timestamp": time.time(),
+                                "uid": rc_uid,
+                                "best_kl_at_time": rc_best_kl,
+                                "king_model": king_model_name,
+                                "king_kl": king_kl,
+                            })
+                    if rechallenge_added:
+                        rechallenge_history_file.write_text(json.dumps(rechallenge_history, indent=2))
+                        print(f"[VALIDATOR] Added {rechallenge_added} re-challenge models to eval", flush=True)
 
             # Sanity check: if too many challengers, something may be wrong with state
             MAX_REASONABLE_CHALLENGERS = 20
