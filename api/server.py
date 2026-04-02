@@ -237,18 +237,48 @@ def _fetch_commitments():
     """Fetch commitments via subprocess to avoid loading bittensor/torch in the API process."""
     import subprocess
     script = """
-import bittensor as bt, json
+import bittensor as bt, json, sys
 sub = bt.Subtensor(network="finney")
 revealed = sub.get_all_revealed_commitments(97)
 commits = {}
 for hotkey, entries in revealed.items():
-    if entries:
-        block, data_str = entries[0]
+    if not entries:
+        continue
+    try:
+        # Take the LAST (most recent) entry
+        block, data_str = entries[-1]
+    except (ValueError, TypeError) as e:
+        print(f"[commitments] bad entry for {hotkey}: {e}", file=sys.stderr)
+        continue
+    # Robust parsing: try JSON first, then hex decode, then raw string
+    parsed = None
+    if isinstance(data_str, str):
+        # Try JSON directly
         try:
             parsed = json.loads(data_str)
-            commits[str(hotkey)] = {"block": block, **parsed}
-        except Exception:
-            commits[str(hotkey)] = {"block": block, "raw": str(data_str)}
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # Try hex-encoded JSON
+        if parsed is None and data_str.startswith("0x"):
+            try:
+                decoded = bytes.fromhex(data_str[2:]).decode("utf-8")
+                parsed = json.loads(decoded)
+            except Exception:
+                pass
+        # Try hex without prefix
+        if parsed is None:
+            try:
+                decoded = bytes.fromhex(data_str).decode("utf-8")
+                parsed = json.loads(decoded)
+            except Exception:
+                pass
+    elif isinstance(data_str, dict):
+        parsed = data_str
+    if parsed and isinstance(parsed, dict):
+        commits[str(hotkey)] = {"block": block, **parsed}
+    else:
+        print(f"[commitments] unparseable for {hotkey}: {str(data_str)[:100]}", file=sys.stderr)
+        commits[str(hotkey)] = {"block": block, "raw": str(data_str)}
 print(json.dumps({"commitments": commits, "count": len(commits)}))
 """
     result = subprocess.run(
@@ -383,7 +413,12 @@ def get_scores(fields: str = ""):
     last_eval = _safe_json_load(eval_path)
     if last_eval is not None:
         result["last_eval"] = last_eval
-        result["last_eval_time"] = os.path.getmtime(eval_path)
+        try:
+            result["last_eval_time"] = os.path.getmtime(eval_path)
+        except OSError:
+            result["last_eval_time"] = last_eval.get("timestamp")
+        result["last_eval_block"] = last_eval.get("block")
+        result["last_eval_type"] = last_eval.get("type")
     # Filter fields if requested
     if fields:
         requested = set(f.strip() for f in fields.split(","))
@@ -446,11 +481,13 @@ def get_model_info(model_path: str):
         return cached
     try:
         import subprocess
-        script = f"""
-import json
+        script = """
+import json, os, sys
 from huggingface_hub import model_info as hf_model_info, hf_hub_download
 
-info = hf_model_info("{model_path}", files_metadata=True)
+model_path = os.environ["MODEL_PATH"]
+
+info = hf_model_info(model_path, files_metadata=True)
 
 params_b = None
 if info.safetensors and hasattr(info.safetensors, "total"):
@@ -461,7 +498,7 @@ is_moe = False
 num_experts = None
 num_active_experts = None
 try:
-    config_path = hf_hub_download(repo_id="{model_path}", filename="config.json")
+    config_path = hf_hub_download(repo_id=model_path, filename="config.json")
     with open(config_path) as f:
         config = json.load(f)
     ne = config.get("num_local_experts", config.get("num_experts", 1))
@@ -474,9 +511,9 @@ except Exception:
     pass
 
 card = info.card_data
-result = {{
-    "model": "{model_path}",
-    "author": info.author or "{model_path}".split("/")[0],
+result = {
+    "model": model_path,
+    "author": info.author or model_path.split("/")[0],
     "tags": list(info.tags) if info.tags else [],
     "downloads": info.downloads,
     "likes": info.likes,
@@ -490,12 +527,15 @@ result = {{
     "license": getattr(card, "license", None) if card else None,
     "pipeline_tag": info.pipeline_tag,
     "base_model": getattr(card, "base_model", None) if card else None,
-}}
+}
 print(json.dumps(result))
 """
+        env = os.environ.copy()
+        env["MODEL_PATH"] = model_path
         result_proc = subprocess.run(
             ["python3", "-c", script],
             capture_output=True, text=True, timeout=30,
+            env=env,
         )
         if result_proc.returncode != 0:
             raise RuntimeError(result_proc.stderr[-300:])
@@ -506,11 +546,10 @@ print(json.dumps(result))
         return {"error": str(e), "model": model_path}
 
 
-@app.get("/api/leaderboard", tags=["Evaluation"], summary="Top-4 leaderboard with drift data",
-         description="Returns the top-4 leaderboard plus cumulative drift data from `state/cumulative_scores.json`.")
+@app.get("/api/leaderboard", tags=["Evaluation"], summary="Top-4 leaderboard",
+         description="Returns the top-4 leaderboard — current king and contenders. Dethronement uses paired t-test (p < 0.05).")
 def get_leaderboard():
     top4 = _safe_json_load(os.path.join(STATE_DIR, "top4_leaderboard.json"), {}) or {}
-    cumulative = _safe_json_load(os.path.join(STATE_DIR, "cumulative_scores.json"), {}) or {}
 
     leaderboard = {
         "king": dict(top4.get("king") or {}) if top4.get("king") else None,
@@ -520,24 +559,9 @@ def get_leaderboard():
         "completed_at": top4.get("completed_at"),
     }
 
-    if leaderboard["king"] is not None:
-        king_uid = str(leaderboard["king"].get("uid", ""))
-        king_drift = cumulative.get(king_uid, {}) if king_uid else {}
-        leaderboard["king"]["cumulative_score"] = king_drift.get("score")
-        leaderboard["king"]["cumulative_rounds"] = king_drift.get("rounds")
-        leaderboard["king"]["last_block"] = king_drift.get("last_block")
-
-    for contender in leaderboard["contenders"]:
-        uid_str = str(contender.get("uid", ""))
-        drift = cumulative.get(uid_str, {}) if uid_str else {}
-        contender["cumulative_score"] = drift.get("score")
-        contender["cumulative_rounds"] = drift.get("rounds")
-        contender["last_block"] = drift.get("last_block")
-
     return JSONResponse(
         content={
             "leaderboard": leaderboard,
-            "cumulative_scores": cumulative,
             "phase": leaderboard["phase"],
         },
         headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"},
@@ -625,10 +649,10 @@ Response includes:
 - `king_uid`: Current king's UID
 - `king_h2h_kl`: King's KL score in this round
 - `king_global_kl`: King's smoothed global KL
-- `epsilon` / `epsilon_threshold`: How close a challenger must get to dethrone the king
+- `p_value`: Paired t-test p-value for the challenger vs king comparison
 - `n_prompts`: Number of prompts used
 - `results[]`: Array of `{uid, model, kl, is_king, vs_king}` for each evaluated miner
-- `king_changed`: Whether the king was dethroned this round
+- `king_changed`: Whether the king was dethroned this round (requires p < 0.05)
 """)
 def get_h2h_latest():
     path = os.path.join(STATE_DIR, "h2h_latest.json")
@@ -819,6 +843,7 @@ def health():
     return {
         "status": "ok",
         "netuid": NETUID,
+        "dethrone_method": "paired_t_test",
         "king_uid": king_uid,
         "king_kl": round(king_kl, 6) if king_kl else None,
         "n_scored": n_scored,
@@ -914,6 +939,137 @@ def gpu_logs(lines: int = 50):
         "lines": log_lines[-max_lines:],
         "count": len(log_lines),
     }
+
+
+# ── Miner lookup endpoints ────────────────────────────────────────────────────
+
+
+@app.get("/api/miner/{uid}", tags=["Miners"], summary="Full miner details by UID",
+         description="""Returns everything known about a specific miner UID.
+
+Response includes:
+- `hotkey` / `coldkey`: On-chain keys
+- `commitment`: Model repo, revision, and commitment block
+- `kl_score`: Current KL-divergence score (lower = better)
+- `disqualified`: Disqualification status and reason (if any)
+- `h2h_history`: Last 10 head-to-head rounds involving this UID
+- `in_top5`: Whether this UID is in the top 5 (king or contender)
+- `is_king`: Whether this UID is the current king
+- `registered`: Whether this UID is registered in the metagraph
+""")
+def get_miner(uid: int):
+    result = {"uid": uid, "registered": False}
+
+    # Metagraph data
+    metagraph = _get_stale("metagraph") or {}
+    neurons = metagraph.get("neurons", [])
+    neuron = None
+    for n in neurons:
+        if n.get("uid") == uid:
+            neuron = n
+            break
+    if neuron:
+        result["registered"] = True
+        result["hotkey"] = neuron.get("hotkey")
+        result["coldkey"] = neuron.get("coldkey")
+        result["stake"] = neuron.get("stake")
+        result["incentive"] = neuron.get("incentive")
+        result["emission"] = neuron.get("emission")
+        result["is_validator"] = neuron.get("is_validator", False)
+    else:
+        result["hotkey"] = None
+        result["coldkey"] = None
+
+    # Commitment
+    commitments_data = _get_stale("commitments") or {}
+    commitments = commitments_data.get("commitments", {})
+    hotkey = result.get("hotkey")
+    if hotkey and hotkey in commitments:
+        result["commitment"] = commitments[hotkey]
+    else:
+        result["commitment"] = None
+
+    # KL score
+    scores = _safe_json_load(os.path.join(STATE_DIR, "scores.json"), {})
+    uid_str = str(uid)
+    result["kl_score"] = scores.get(uid_str)
+
+    # Disqualification
+    dq = _safe_json_load(os.path.join(STATE_DIR, "disqualified.json"), {})
+    result["disqualified"] = dq.get(uid_str)
+
+    # Top 5 / king status
+    top4 = _safe_json_load(os.path.join(STATE_DIR, "top4_leaderboard.json"), {})
+    king = top4.get("king") or {}
+    contenders = top4.get("contenders") or []
+    result["is_king"] = king.get("uid") == uid
+    top5_uids = set()
+    if king.get("uid") is not None:
+        top5_uids.add(king["uid"])
+    for c in contenders:
+        if c.get("uid") is not None:
+            top5_uids.add(c["uid"])
+    result["in_top5"] = uid in top5_uids
+
+    # H2H history (last 10 rounds involving this UID)
+    h2h_history = _safe_json_load(os.path.join(STATE_DIR, "h2h_history.json"), [])
+    relevant = []
+    for rnd in reversed(h2h_history):
+        for r in rnd.get("results", []):
+            if r.get("uid") == uid:
+                relevant.append({
+                    "block": rnd.get("block"),
+                    "timestamp": rnd.get("timestamp"),
+                    "kl": r.get("kl"),
+                    "is_king": r.get("is_king", False),
+                    "king_changed": rnd.get("king_changed", False),
+                    "type": rnd.get("type"),
+                })
+                break
+        if len(relevant) >= 10:
+            break
+    result["h2h_history"] = relevant
+
+    return JSONResponse(
+        content=result,
+        headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"},
+    )
+
+
+@app.get("/api/commitment/{hotkey}", tags=["Miners"], summary="Lookup commitment by hotkey",
+         description="""Lookup a miner's on-chain model commitment by their hotkey (ss58 address).
+
+Useful for miners to verify the validator sees their commitment after submitting.
+
+Response includes:
+- `commitment`: Model repo, revision, and commitment block (if found)
+- `uid`: Registered UID (if registered in metagraph)
+- `registered`: Whether this hotkey is registered
+""")
+def get_commitment_by_hotkey(hotkey: str):
+    result = {"hotkey": hotkey, "registered": False, "uid": None, "commitment": None}
+
+    # Find UID from metagraph
+    metagraph = _get_stale("metagraph") or {}
+    for n in metagraph.get("neurons", []):
+        if n.get("hotkey") == hotkey:
+            result["registered"] = True
+            result["uid"] = n.get("uid")
+            result["coldkey"] = n.get("coldkey")
+            result["stake"] = n.get("stake")
+            result["incentive"] = n.get("incentive")
+            break
+
+    # Commitment data
+    commitments_data = _get_stale("commitments") or {}
+    commitments = commitments_data.get("commitments", {})
+    if hotkey in commitments:
+        result["commitment"] = commitments[hotkey]
+
+    return JSONResponse(
+        content=result,
+        headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"},
+    )
 
 
 # ── Chat with king model ──────────────────────────────────────────────────────
