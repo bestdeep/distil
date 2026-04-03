@@ -746,66 +746,60 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 king_model_name = valid_models.get(king_uid, {}).get("model", "")
                 smart_challenger_added = 0
 
-                # Priority 1: Best untested models — never H2H'd against current king
-                # Models with global scores that haven't faced this king yet
-                p1_candidates = []
+                                # Priority 1: Truly new models — never scored at all
+                # Brand-new submissions that need their first eval.
+                p1_new = []
                 for uid, info in valid_models.items():
                     if uid == king_uid or uid in challengers:
                         continue
-                    model_name = info["model"]
-                    if model_name in permanently_bad_models:
+                    if info["model"] in permanently_bad_models:
                         continue
                     uid_str = str(uid)
-                    # Must have a global score
                     global_kl = scores.get(uid_str)
-                    if global_kl is None or global_kl <= 0 or global_kl > MAX_KL_THRESHOLD:
+                    if global_kl is not None:  # has a score = not new
                         continue
-                    # Check if already H2H tested against current king
-                    h2h_record = h2h_tested_against_king.get(uid_str, {})
-                    if h2h_record.get("king_uid") == king_uid:
-                        continue  # already tested against this king
-                    p1_candidates.append((uid, global_kl, model_name))
+                    p1_new.append((uid, info["model"]))
 
-                if p1_candidates:
-                    p1_candidates.sort(key=lambda x: x[1])  # best KL first
-                    
-                    # Check if we're in initial_eval phase — ALL models in one round
-                    top4_file = state_path / "top4_leaderboard.json"
-                    in_initial_eval = True
-                    if top4_file.exists():
-                        try:
-                            t4 = json.loads(top4_file.read_text())
-                            in_initial_eval = t4.get("phase") == "initial_eval"
-                        except Exception:
-                            pass
-                    
-                    if in_initial_eval:
-                        # Full eval: ALL models with global KL <= 0.12 in one round
-                        # No king advantage — pure comparison, lowest KL wins
-                        FULL_EVAL_KL_CUTOFF = 0.12
-                        eligible = [(u, k, m) for u, k, m in p1_candidates if k <= FULL_EVAL_KL_CUTOFF]
-                        excluded = len(p1_candidates) - len(eligible)
-                        for p1_uid, p1_kl, p1_model in eligible:
-                            challengers[p1_uid] = valid_models[p1_uid]
-                            smart_challenger_added += 1
-                        print(f"[VALIDATOR] \U0001f3c6 FULL EVAL: {len(eligible)} models in one round "
-                              f"(excluded {excluded} with KL>{FULL_EVAL_KL_CUTOFF}, "
-                              f"best: UID {eligible[0][0]} KL={eligible[0][1]:.6f}, "
-                              f"worst: UID {eligible[-1][0]} KL={eligible[-1][1]:.6f})", flush=True)
-                    else:
-                        # Maintenance mode: ALL untested models in every round
-                        for p1_uid, p1_kl, p1_model in p1_candidates:
-                            challengers[p1_uid] = valid_models[p1_uid]
-                            smart_challenger_added += 1
-                        print(f"[VALIDATOR] 🎯 SMART CHALLENGER: {len(p1_candidates)} untested model(s) added "
-                              f"— Priority 1: all untested vs current king", flush=True)
+                # ALL new submissions in every round — no waiting
+                if p1_new:
+                    for p1_uid, p1_model in p1_new:
+                        challengers[p1_uid] = valid_models[p1_uid]
+                        smart_challenger_added += 1
+                    print(f"[VALIDATOR] \U0001f3af SMART CHALLENGER: {len(p1_new)} new submission(s) added "
+                          f"— Priority 1: never evaluated", flush=True)
 
-                # Priority 2: New submissions are already in challengers from the
-                # main loop above (models not in evaluated_uids/scores).
-                p2_count = sum(1 for uid in challengers if str(uid) not in scores)
-                if p2_count:
-                    print(f"[VALIDATOR] \U0001f3af SMART CHALLENGER: {p2_count} new submission(s) "
-                          f"— Priority 2: not yet evaluated", flush=True)
+                # Priority 1b: Initial eval phase — all scored models untested vs new king
+                top4_file = state_path / "top4_leaderboard.json"
+                in_initial_eval = True
+                if top4_file.exists():
+                    try:
+                        t4 = json.loads(top4_file.read_text())
+                        in_initial_eval = t4.get("phase") == "initial_eval"
+                    except Exception:
+                        pass
+                if in_initial_eval:
+                    FULL_EVAL_KL_CUTOFF = 0.12
+                    p1b = []
+                    for uid, info in valid_models.items():
+                        if uid == king_uid or uid in challengers:
+                            continue
+                        if info["model"] in permanently_bad_models:
+                            continue
+                        uid_str = str(uid)
+                        global_kl = scores.get(uid_str)
+                        if global_kl is None or global_kl <= 0 or global_kl > FULL_EVAL_KL_CUTOFF:
+                            continue
+                        h2h_record = h2h_tested_against_king.get(uid_str, {})
+                        if h2h_record.get("king_uid") == king_uid:
+                            continue
+                        p1b.append((uid, global_kl, info["model"]))
+                    if p1b:
+                        p1b.sort(key=lambda x: x[1])
+                        for p1b_uid, p1b_kl, p1b_model in p1b:
+                            challengers[p1b_uid] = valid_models[p1b_uid]
+                            smart_challenger_added += 1
+                        print(f"[VALIDATOR] \U0001f3c6 FULL EVAL: {len(p1b)} scored models added "
+                              f"(untested vs new king, KL<=0.12)", flush=True)
 
                 # Priority 3: Stale re-tests — last H2H was >STALE_H2H_EPOCHS ago
                 # AND global score within 2x of king's KL (might have been unlucky)
