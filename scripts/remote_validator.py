@@ -469,6 +469,36 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 save_disqualified(dq_reasons, state_path)
                 print(f"[VALIDATOR] Migrated {_migrated} DQ entries to per-commit format", flush=True)
 
+            # ── Scrub stale bare-UID DQ entries ──
+            # When a UID gets a new occupant (different hotkey/commitment),
+            # legacy DQ entries keyed by bare UID must not carry over.
+            _scrubbed = 0
+            for key in list(dq_reasons.keys()):
+                if not key.isdigit():
+                    continue
+                _uid = int(key)
+                if _uid not in commitments:
+                    continue  # no current commitment — keep the entry
+                _com = commitments[_uid]
+                _hk = _com.get("hotkey", "")
+                _blk = _com.get("block")
+                # If there's a per-commit DQ for this hotkey:block, the bare UID is redundant
+                if _blk and f"{_hk}:{_blk}" in dq_reasons:
+                    del dq_reasons[key]
+                    _scrubbed += 1
+                    continue
+                # If the DQ reason references a model that's NOT the current commitment,
+                # it's from an old occupant — remove it
+                _current_model = _com.get("model", "")
+                _dq_reason = dq_reasons[key]
+                if _current_model and _current_model not in _dq_reason:
+                    print(f"[VALIDATOR] Removing stale bare-UID DQ: UID {_uid} (current model: {_current_model}, DQ reason references different model)", flush=True)
+                    del dq_reasons[key]
+                    _scrubbed += 1
+            if _scrubbed:
+                save_disqualified(dq_reasons, state_path)
+                print(f"[VALIDATOR] Scrubbed {_scrubbed} stale bare-UID DQ entries", flush=True)
+
             # ══════════════════════════════════════════════════════════════
             # STATE VALIDATION: Catch inconsistencies before they waste GPU
             # ══════════════════════════════════════════════════════════════

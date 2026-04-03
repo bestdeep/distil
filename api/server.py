@@ -1067,9 +1067,17 @@ def get_miner(uid: int):
     uid_str = str(uid)
     result["kl_score"] = scores.get(uid_str)
 
-    # Disqualification
+    # Disqualification — check per-commit key first, fall back to legacy keys
+    # only if no commit_block is known (same logic as eval/scoring.py is_disqualified)
     dq = _safe_json_load(os.path.join(STATE_DIR, "disqualified.json"), {})
-    result["disqualified"] = dq.get(uid_str)
+    commit_block = result.get("commitment", {}).get("block") if result.get("commitment") else None
+    dq_reason = None
+    if commit_block is not None and hotkey:
+        dq_reason = dq.get(f"{hotkey}:{commit_block}")
+    if dq_reason is None and commit_block is None:
+        # Only use legacy bare keys when we don't know the commit block
+        dq_reason = dq.get(uid_str) or dq.get(hotkey) if hotkey else dq.get(uid_str)
+    result["disqualified"] = dq_reason
 
     # Top 5 / king status
     top4 = _safe_json_load(os.path.join(STATE_DIR, "top4_leaderboard.json"), {})
