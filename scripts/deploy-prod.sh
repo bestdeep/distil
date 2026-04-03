@@ -1,6 +1,10 @@
 #!/bin/bash
 # Deploy API + Frontend to production server (distil-api / 46.224.105.143)
 # Usage: ./scripts/deploy-prod.sh [api|frontend|both]
+#
+# API code: synced from this server's /home/openclaw/distillation/api/ + eval/
+# Frontend: edited directly on prod at /opt/distil/frontend/ (no local copy)
+# State: auto-synced every 15s by PM2 distil-sync
 set -euo pipefail
 
 REMOTE="distil-api"
@@ -24,10 +28,9 @@ deploy_api() {
 }
 
 deploy_frontend() {
-    echo "==> Deploying frontend to $REMOTE..."
-    rsync -avz --exclude='node_modules' --exclude='.next' --exclude='.git' \
-        /home/openclaw/distillation-frontend/ "$REMOTE:/opt/distil/frontend/"
-    echo "==> Building frontend on $REMOTE..."
+    echo "==> Building and restarting frontend on $REMOTE..."
+    echo "    (frontend source lives on $REMOTE at /opt/distil/frontend/)"
+    echo "    Edit files there directly via: ssh distil-api 'vim /opt/distil/frontend/src/...'"
     ssh -t "$REMOTE" 'cd /opt/distil/frontend && NEXT_PUBLIC_API_URL=https://api.arbos.life npx next build'
     echo "==> Restarting distil-dashboard service..."
     ssh -t "$REMOTE" 'systemctl restart distil-dashboard'
