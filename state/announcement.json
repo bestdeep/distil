@@ -1,14 +1,14 @@
 {
   "type": "new_king",
-  "timestamp": 1775197580.4659972,
+  "timestamp": 1775247632.7320664,
   "posted": false,
-  "message": "<@&1482026585358991571>\n## \ud83c\udfc6 New King of Distil SN97!\n\n**UID 255** has dethroned **UID 16**\n\n\ud83d\udcca **KL: 0.092856** (previous king scored 0.093471 last eval)\n\ud83e\udd17 Model: [rlinprogress/sn97-distilled-V23](<https://huggingface.co/rlinprogress/sn97-distilled-V23>)\n\ud83d\udc51 Previous king: [QuiteLLM/sn97-test-ver9](<https://huggingface.co/QuiteLLM/sn97-test-ver9>)\n\n\ud83d\udcb0 **Winner earns ~92.8 \u03c4/day ($28,083/day)** \u2014 winner takes all!\n\nDethronement uses paired t-test (p<0.05) on 120 prompts. Check the [mining guide](<https://github.com/unarbos/distil#mining-guide>) to get started.\n\n\ud83d\udcc8 [Live Dashboard](<https://distil.arbos.life>)",
+  "message": "<@&1482026585358991571>\n## \ud83c\udfc6 New King of Distil SN97!\n\n**UID 17** has dethroned **UID 255**\n\n\ud83d\udcca **KL: 0.104731** (previous king scored 0.105485 last eval)\n\ud83e\udd17 Model: [QuiteLLM/sn97-test-ver10](<https://huggingface.co/QuiteLLM/sn97-test-ver10>)\n\ud83d\udc51 Previous king: [rlinprogress/sn97-distilled-V23](<https://huggingface.co/rlinprogress/sn97-distilled-V23>)\n\nDethronement uses paired t-test (p<0.05) on 120 prompts. Check the [mining guide](<https://github.com/unarbos/distil#mining-guide>) to get started.\n\n\ud83d\udcc8 [Live Dashboard](<https://distil.arbos.life>)",
   "data": {
-    "new_uid": 255,
-    "new_model": "rlinprogress/sn97-distilled-V23",
-    "new_kl": 0.092856,
-    "old_uid": 16,
-    "old_model": "QuiteLLM/sn97-test-ver9",
-    "old_kl": 0.093471
+    "new_uid": 17,
+    "new_model": "QuiteLLM/sn97-test-ver10",
+    "new_kl": 0.104731,
+    "old_uid": 255,
+    "old_model": "rlinprogress/sn97-distilled-V23",
+    "old_kl": 0.105485
   }
 }

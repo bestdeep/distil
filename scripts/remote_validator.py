@@ -93,7 +93,7 @@ MAX_PROMPT_TOKENS = 1024
 # Prompts per head-to-head evaluation (king + challenger on same prompts)
 # Bumped from 60 → 120 to halve variance (per Arbos: "I could bump to 120+ without much pain")
 EVAL_PROMPTS_FULL = 60   # Full eval: many models, need speed
-EVAL_PROMPTS_H2H = 60   # Temporarily reduced from 120 until eval stability confirmed
+EVAL_PROMPTS_H2H = 120   # Restored after eval stability confirmed
 # Epsilon: challenger must beat king by this relative margin to dethrone
 # e.g., 0.01 = challenger KL must be < king_kl * 0.99 (1% better)
 EPSILON = 0.01  # Legacy — kept as fallback if per-prompt data unavailable

@@ -1,91 +1,80 @@
-# B200 Eval Pod Setup — Reproducibility Notes
+# B200 Eval Setup — Definitive Guide
 
-**Date:** 2026-04-03
-**GPU:** NVIDIA B200 (sm_100, 183GB VRAM, CUDA driver 580.x)
-**Cost:** $2.99/hr on Lium
+## Overview
+Running SN97 distillation eval on NVIDIA B200 (sm_100, 183GB VRAM) using Lium GPU pods.
 
-## Working Configuration
+## Working Stack (confirmed 2026-04-03)
+- **Template**: `64c96459` (PyTorch 2.7.0-py3.12-cuda12.8.0)
+- **After `pip install vllm`**: torch 2.10.0+cu128, vLLM 0.19.0
+- **transformers**: Must be ≥5.0 (for `qwen3_5_moe` architecture support)
+  - `pip install "transformers>=5.0"` AFTER vllm to avoid downgrade
+- **flash-attn**: Not needed — vLLM uses FlashInfer 0.6.6 internally
+- **accelerate**: Required for HF fallback loading
 
-### Template
-- **Lium template:** `64c96459-29f1-4578-8785-0c56ec3341cc`
-- **Image:** `daturaai/pytorch:2.7.0-py3.12-cuda12.8.0-devel-ubuntu22.04`
-- This gives Python 3.12, PyTorch 2.7.0+cu128, CUDA 12.8
+## Critical Fixes Required
 
-### Dependencies (installed on pod)
-```bash
-pip install vllm accelerate transformers
-```
-This upgrades PyTorch to 2.10.0+cu128 (vLLM's dependency) which is fine — B200 sm_100 support works.
+### 1. grouped_mm Patch (MANDATORY for B200)
+`torch._grouped_mm` only supports sm_90. B200 is sm_100. Crashes MoE models.
 
-### Final versions (confirmed working)
-- **PyTorch:** 2.10.0+cu128
-- **vLLM:** 0.19.0
-- **transformers:** 5.5.0
-- **Python:** 3.12.10
-
-## vLLM on B200
-
-### ✅ Works
-- vLLM **server mode** (`python3 -m vllm.entrypoints.openai.api_server`) — works fine
-- `--enforce-eager` is NOT needed with torch 2.10.0+cu128 — CUDA graphs compile fine on B200
-- Without enforce-eager: startup ~54s for gpt2 (compilation), then much faster inference
-- With enforce-eager: startup ~15s but 3-5x slower inference. Don't use it.
-- Server starts in ~5-10 min for Qwen3.5-35B-A3B (first-time CUDA graph compilation)
-
-### ❌ Common Pitfalls
-1. **Multiprocessing spawn guard**: vLLM uses `spawn` multiprocessing. Any script using `from vllm import LLM` must have `if __name__ == "__main__":` guard, or the child process re-executes the entire script and crashes.
-2. **Old PyTorch**: PyTorch < 2.7.0 does NOT support B200 sm_100. The default `Pytorch (Cuda)` template (id `bfda7aa0`) has PyTorch 2.1.1+cu121 — **DO NOT USE** for B200.
-3. **FlashInfer**: Works with `--enforce-eager`. Without it, kernel compilation may hang for 10+ minutes on first run.
-4. **Template `vllm/vllm-openai:latest`**: Has vLLM pre-installed but **NO SSH server** — unusable with Lium's SSH-based exec.
-
-### vLLM Server Launch Command (for eval)
-```bash
-python3 -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3.5-35B-A3B \
-  --port 9100 \
-  --served-model-name teacher \
-  --trust-remote-code \
-  --dtype bfloat16 \
-  --gpu-memory-utilization 0.45 \
-  --max-model-len 4096 \
-  --enable-prefix-caching \
-  --no-enable-log-requests
+Patch `transformers/integrations/moe.py`, function `_can_use_grouped_mm`:
+```python
+# Replace:
+return hasattr(torch.nn.functional, "grouped_mm") or hasattr(torch, "_grouped_mm")
+# With:
+cap = torch.cuda.get_device_capability(0) if torch.cuda.is_available() else (0,0)
+if cap[0] >= 10:
+    return hasattr(torch.nn.functional, "grouped_mm")
+return hasattr(torch.nn.functional, "grouped_mm") or hasattr(torch, "_grouped_mm")
 ```
 
-### Startup Timeout
-- vLLM server for 35B MoE model on B200: allow **15 minutes** (900s) for first startup
-  - Model download: variable (depends on cache)
-  - Weight loading: ~2-3 min
-  - With `--enforce-eager`: no compilation step
-  - The eval script (`pod_eval_vllm.py`) has a 900s health-check loop
+### 2. vLLM Must Stop Before HF Teacher Logit Extraction
+vLLM uses 84GB (gpu_memory_utilization=0.45). Teacher HF model needs 65GB.
+84 + 65 = 149GB + CUDA overhead > available VRAM.
 
-## Multi-GPU Pods (4090, 3090, etc.)
+The eval script (`pod_eval_vllm.py`) stops vLLM before Phase 1b and does NOT restart it
+(students are scored via HF, not vLLM).
 
-### ⚠️ RAM Limitation
-- `teacher_cache.pt` is ~60GB (120 prompts × full vocab logits for 35B model)
-- Parallel Step 2 (split students across GPUs) loads this cache per process
-- **Require ≥128GB RAM** for parallel mode, otherwise OOM kills processes
-- The validator checks RAM and falls back to sequential mode if < 128GB
+### 3. NO Teacher Cache Save (Disk Constraint)
+teacher_cache.pt is ~45GB. Lium pods have ~230GB disk.
+67GB model cache + 45GB teacher_cache + OS = disk full.
+Cache save is disabled. Each round regenerates teacher logits (~56s).
 
-### Tensor Parallelism
-- TP size must be a power of 2 (1, 2, 4, 8) — model dims must be divisible
-- The eval script picks the largest power-of-2 ≤ GPU count
-- 5×4090: uses TP=4 (one GPU idle)
+### 4. transformers Version Matters
+- `pip install vllm` pins transformers to 4.57.6 — this version does NOT support `qwen3_5_moe`
+- The eval script loads the teacher via HF for logit extraction. Without ≥5.0, it silently fails.
+- Fix: `pip install "transformers>=5.0"` after vllm install (no-deps not needed)
+- The grouped_mm patch must be RE-APPLIED after every transformers upgrade
+
+## Dependency Install Order (CRITICAL)
+```bash
+pip install vllm accelerate          # Sets torch 2.10.0, vLLM 0.19.0
+pip install "transformers>=5.0"      # Upgrade from 4.57.6 to ≥5.0
+# Then apply grouped_mm patch
+```
+
+DO NOT: `pip install transformers vllm` (transformers may downgrade torch)
+
+## Performance Baselines (B200, 120 prompts, 9 students)
+- vLLM text generation: ~4 min (120 prompts)
+- HF teacher load: ~11s (model cached)
+- Logit extraction: ~56s
+- Student scoring: ~10 min (9 × ~1 min)
+- **Total round: ~16 min**
+
+## Things That DON'T Work
+- `--enforce-eager`: 3-5x slowdown, not needed with torch 2.10.0
+- flash-attn pre-built wheels: Incompatible with torch 2.10.0, must compile from source (~30 min)
+- teacher_cache.pt on 230GB pods: Fills disk
+- `pip install --no-deps transformers`: May miss deps, use regular install
+- `vllm/vllm-openai` Docker image: No SSH server, incompatible with Lium
+
+## Pod Cleanup
+After each student, the eval script runs `shutil.rmtree()` on the HF cache for that model.
+Monitor disk with `df -h /` — should stay under 90%.
 
 ## Troubleshooting
-
-### "Engine core initialization failed"
-- Usually multiprocessing spawn issue — add `if __name__ == "__main__":` guard
-- Or PyTorch too old for the GPU architecture
-
-### "8192 is not divisible by N"
-- TP size must divide model dimension. Use power-of-2 TP.
-
-### SSH "Error reading SSH protocol banner"
-- The `vllm/vllm-openai` Docker image has no SSH. Use a PyTorch template instead.
-- Some B200 executors take 4+ minutes for SSH to become available after RUNNING status.
-
-### Teacher cache too large for RAM
-- Sequential eval mode (1 GPU process at a time) uses ~60GB RAM
-- Parallel mode (2 processes) needs ~120GB RAM
-- Solution: the validator auto-detects RAM and disables parallel mode if < 128GB
+- **Eval stuck after Phase 1a**: transformers too old, or OOM from vLLM + HF teacher coexisting
+- **"_grouped_mm" error**: Patch not applied
+- **"You can update Transformers" in logs**: transformers doesn't recognize model architecture
+- **Corrupt teacher_cache.pt**: Delete it, eval will regenerate
+- **Disk 95%+**: Delete teacher_cache.pt.tmp, stale HF caches
