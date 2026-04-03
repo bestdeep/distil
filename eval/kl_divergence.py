@@ -17,18 +17,48 @@ from typing import Optional
 logger = logging.getLogger("distillation.kl")
 
 
+# Chunk size for memory-efficient KL computation (positions per chunk)
+KL_CHUNK_SIZE = 128
+
+
+# Compiled inner kernel for chunked KL — 2.4x faster, 10x less memory
+# Credit: caseus (github.com/winglian) — see gist.github.com/winglian/5f506527fe2d5b35705dac34ea5c4b5b
+try:
+    @torch.compile(fullgraph=True)
+    def _kl_chunk_compiled(t_chunk: torch.Tensor, s_chunk: torch.Tensor) -> torch.Tensor:
+        t_log_p = F.log_softmax(t_chunk, dim=-1)
+        s_log_p = F.log_softmax(s_chunk, dim=-1)
+        return F.kl_div(s_log_p, t_log_p, log_target=True, reduction="none").sum(dim=-1)
+    _USE_COMPILED = True
+except Exception:
+    _USE_COMPILED = False
+    logger.warning("torch.compile not available, falling back to eager KL")
+
+
+def _kl_chunk_eager(t_chunk: torch.Tensor, s_chunk: torch.Tensor) -> torch.Tensor:
+    """Eager fallback for environments without torch.compile."""
+    t_log_p = F.log_softmax(t_chunk, dim=-1)
+    s_log_p = F.log_softmax(s_chunk, dim=-1)
+    return F.kl_div(s_log_p, t_log_p, log_target=True, reduction="none").sum(dim=-1)
+
+
 def compute_kl_from_logits(
     teacher_logits: torch.Tensor,
     student_logits: torch.Tensor,
     start_pos: int = 0,
+    chunk_size: int = KL_CHUNK_SIZE,
 ) -> dict:
     """
     Exact KL(teacher || student) from full logit tensors.
+
+    Uses chunked computation with torch.compile for ~2.4x speedup and ~10x
+    memory reduction vs the naive full-sequence approach.
 
     Args:
         teacher_logits: [1, seq_len, vocab_size] or [seq_len, vocab_size]
         student_logits: same shape
         start_pos: compute KL only from this position onward (0 = all positions)
+        chunk_size: positions per chunk (default 128)
 
     Returns:
         dict with kl_mean, kl_std, kl_max, kl_min, n_positions
@@ -42,13 +72,16 @@ def compute_kl_from_logits(
         teacher_logits = teacher_logits[start_pos:]
         student_logits = student_logits[start_pos:]
 
-    # Compute in float32 for numerical stability
-    t_log_p = F.log_softmax(teacher_logits.float(), dim=-1)
-    s_log_p = F.log_softmax(student_logits.float(), dim=-1)
-    t_p = t_log_p.exp()
+    n_pos = teacher_logits.shape[0]
+    kl_per_pos = torch.empty(n_pos, device=teacher_logits.device)
 
-    # KL(P || Q) = sum_x P(x) * (log P(x) - log Q(x))
-    kl_per_pos = (t_p * (t_log_p - s_log_p)).sum(dim=-1)
+    kl_fn = _kl_chunk_compiled if _USE_COMPILED else _kl_chunk_eager
+
+    for i in range(0, n_pos, chunk_size):
+        j = min(i + chunk_size, n_pos)
+        kl_per_pos[i:j] = kl_fn(
+            teacher_logits[i:j].float(), student_logits[i:j].float()
+        )
 
     return {
         "kl_mean": kl_per_pos.mean().item(),
