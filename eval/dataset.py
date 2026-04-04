@@ -35,7 +35,7 @@ def sample_prompts_from_dataset(
     split: str = DEFAULT_SPLIT,
     text_field: str = CLIMBMIX_TEXT_FIELD,
     min_chars: int = 200,
-    max_chars: int = 4000,
+    max_chars: int = 10000,
     cache_dir: Path | None = None,
 ) -> list[str]:
     """Sample n prompts from karpathy/climbmix-400b-shuffle (6,542 shards).
@@ -160,7 +160,7 @@ def sample_prompts_from_dataset(
     return prompts
 
 
-def format_prompt(text: str, max_chars: int = 4000) -> str:
+def format_prompt(text: str, max_chars: int = 10000) -> str:
     """Format a raw pretraining text as a continuation prompt.
 
     Uses the first ~max_chars as context, model continues from there.
