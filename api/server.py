@@ -1309,8 +1309,11 @@ def get_commitment_by_hotkey(hotkey: str):
 
 
 # Chat server runs on the GPU pod at port 8100 (scripts/chat_server.py).
-# We proxy requests via Lium SSH exec + curl.
+# We proxy requests via direct SSH + curl (no lium dependency).
 CHAT_POD_PORT = 8100
+CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "91.224.44.81")
+CHAT_POD_SSH_PORT = int(os.environ.get("CHAT_POD_SSH_PORT", "20300"))
+CHAT_POD_SSH_KEY = os.environ.get("CHAT_POD_SSH_KEY", os.path.expanduser("~/.ssh/id_ed25519"))
 
 
 def _get_king_info():
@@ -1346,24 +1349,16 @@ def _get_king_info():
     return king_uid, None
 
 
-def _lium_pod(name_hint="chat-king"):
-    """Get Lium client and pod. Prefers chat-king pod, falls back to distil-eval."""
-    from lium import Lium, Config
-    from pathlib import Path
-    lium_key = os.environ.get("LIUM_API_KEY")
-    if not lium_key:
-        return None, None
-    lium = Lium(config=Config(api_key=lium_key, ssh_key_path=str(Path.home() / ".ssh" / "id_ed25519")))
-    pods = lium.ps()
-    # Prefer chat-king pod
-    for p in pods:
-        if getattr(p, "name", "") == name_hint:
-            return lium, p
-    # Fallback to distil-eval
-    for p in pods:
-        if "distil" in str(getattr(p, "name", "")).lower():
-            return lium, p
-    return None, None
+def _ssh_exec(cmd: str, timeout: int = 30) -> str:
+    """Execute command on chat pod via SSH. Returns stdout."""
+    import subprocess
+    ssh_cmd = [
+        "ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+        "-i", CHAT_POD_SSH_KEY, "-p", str(CHAT_POD_SSH_PORT),
+        f"root@{CHAT_POD_HOST}", cmd,
+    ]
+    result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=timeout)
+    return result.stdout
 
 
 
@@ -1404,10 +1399,6 @@ async def chat_with_king(request: Request):
         return {"error": "no king model available"}
 
     try:
-        lium, pod = _lium_pod()
-        if not pod:
-            return {"error": "GPU pod not found"}
-
         pod_payload = {
             "messages": messages,
             "max_tokens": max_tokens,
@@ -1417,23 +1408,21 @@ async def chat_with_king(request: Request):
         }
 
         if stream:
-            return _stream_chat(lium, pod, pod_payload, king_uid, king_model)
+            return _stream_chat(pod_payload, king_uid, king_model)
         else:
-            return _sync_chat(lium, pod, pod_payload, king_uid, king_model)
+            return _sync_chat(pod_payload, king_uid, king_model)
 
     except Exception as e:
         return {"error": f"chat error: {str(e)[:200]}"}
 
 
-def _sync_chat(lium, pod, payload, king_uid, king_model):
-    """Non-streaming chat proxy."""
+def _sync_chat(payload, king_uid, king_model):
+    """Non-streaming chat proxy via SSH + curl."""
+    import base64
     payload["stream"] = False
-    # Write payload to pod temp file to avoid shell injection
-    payload_json = json.dumps(payload)
-    lium.exec(pod, command=f"cat > /tmp/_chat_payload.json << 'CHATEOF'\n{payload_json}\nCHATEOF")
-    cmd = f"curl -s -X POST http://localhost:{CHAT_POD_PORT}/v1/chat/completions -H 'Content-Type: application/json' -d @/tmp/_chat_payload.json"
-    result = lium.exec(pod, command=cmd)
-    stdout = result.get("stdout", "") if isinstance(result, dict) else str(result)
+    payload_b64 = base64.b64encode(json.dumps(payload).encode()).decode()
+    cmd = f"echo '{payload_b64}' | base64 -d | curl -s -X POST http://localhost:{CHAT_POD_PORT}/v1/chat/completions -H 'Content-Type: application/json' -d @-"
+    stdout = _ssh_exec(cmd, timeout=60)
 
     try:
         data = json.loads(stdout)
@@ -1453,34 +1442,36 @@ def _sync_chat(lium, pod, payload, king_uid, king_model):
         return {"error": "chat server not responding — may be starting up", "details": stdout[:300]}
 
 
-def _stream_chat(lium, pod, payload, king_uid, king_model):
-    """Streaming chat proxy via SSE. Uses lium.stream_exec to pipe pod SSE → client."""
-    # Write payload to pod temp file to avoid shell injection
-    lium.exec(pod, command=f"cat > /tmp/_chat_payload_stream.json << 'CHATEOF'\n{json.dumps(payload)}\nCHATEOF")
-    cmd = f"curl -sN -X POST http://localhost:{CHAT_POD_PORT}/v1/chat/completions -H 'Content-Type: application/json' -d @/tmp/_chat_payload_stream.json"
+def _stream_chat(payload, king_uid, king_model):
+    """Streaming chat proxy via SSE. SSH + curl -N pipes pod SSE → client."""
+    import base64, subprocess
+    payload["stream"] = True
+    payload_b64 = base64.b64encode(json.dumps(payload).encode()).decode()
+    cmd = f"echo '{payload_b64}' | base64 -d | curl -sN -X POST http://localhost:{CHAT_POD_PORT}/v1/chat/completions -H 'Content-Type: application/json' -d @-"
 
     def generate():
         try:
-            for chunk in lium.stream_exec(pod, command=cmd):
-                data = chunk.get("data", "")
-                if not data:
-                    continue
-                # Forward SSE lines from pod curl
-                for line in data.split("\n"):
-                    line = line.strip()
-                    if line.startswith("data: "):
-                        raw = line[6:]
-                        if raw == "[DONE]":
-                            yield "data: [DONE]\n\n"
-                            return
-                        try:
-                            parsed = json.loads(raw)
-                            # Inject king info
-                            parsed["king_uid"] = king_uid
-                            parsed["king_model"] = king_model
-                            yield f"data: {json.dumps(parsed)}\n\n"
-                        except json.JSONDecodeError:
-                            yield f"data: {raw}\n\n"
+            ssh_cmd = [
+                "ssh", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=no",
+                "-i", CHAT_POD_SSH_KEY, "-p", str(CHAT_POD_SSH_PORT),
+                f"root@{CHAT_POD_HOST}", cmd,
+            ]
+            proc = subprocess.Popen(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("data: "):
+                    raw = line[6:]
+                    if raw == "[DONE]":
+                        yield "data: [DONE]\n\n"
+                        break
+                    try:
+                        parsed = json.loads(raw)
+                        parsed["king_uid"] = king_uid
+                        parsed["king_model"] = king_model
+                        yield f"data: {json.dumps(parsed)}\n\n"
+                    except json.JSONDecodeError:
+                        yield f"data: {raw}\n\n"
+            proc.wait(timeout=5)
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)[:200]})}\n\n"
 
@@ -1499,7 +1490,7 @@ _chat_restart_lock = threading.Lock()
 _last_chat_restart = 0.0
 
 
-def _ensure_chat_server(lium, pod, king_model=None):
+def _ensure_chat_server(king_model=None):
     """Auto-start chat server if not running. Rate-limited to once per 2 min."""
     global _last_chat_restart
     with _chat_restart_lock:
@@ -1507,14 +1498,12 @@ def _ensure_chat_server(lium, pod, king_model=None):
             return  # Already tried recently
         _last_chat_restart = time.time()
 
-    model_name = king_model or "aceini/q-dist"
+    model_name = king_model or "unknown"
     try:
-        # Check if already running
-        r = lium.exec(pod, command="pgrep -f chat_server.py || echo not_running")
-        stdout = r.get("stdout", "") if isinstance(r, dict) else ""
+        stdout = _ssh_exec("pgrep -f chat_server.py || echo not_running")
         if "not_running" in stdout:
             print(f"[chat] Auto-starting chat server for {model_name}", flush=True)
-            lium.exec(pod, command=f"nohup python3 /root/chat_server.py {model_name} {CHAT_POD_PORT} > /tmp/chat_server.log 2>&1 &")
+            _ssh_exec(f"nohup python3 /root/chat_server.py '{model_name}' {CHAT_POD_PORT} > /tmp/chat_server.log 2>&1 &", timeout=10)
     except Exception as e:
         print(f"[chat] Auto-restart failed: {e}", flush=True)
 
@@ -1529,15 +1518,12 @@ def chat_status():
     # Try health check on pod
     server_ok = False
     try:
-        lium, pod = _lium_pod()
-        if pod:
-            result = lium.exec(pod, command=f"curl -s http://localhost:{CHAT_POD_PORT}/health")
-            stdout = result.get("stdout", "") if isinstance(result, dict) else ""
-            if '"status": "ok"' in stdout or '"status":"ok"' in stdout:
-                server_ok = True
-            elif not eval_active:
-                # Server not responding and no eval in progress — auto-restart
-                _ensure_chat_server(lium, pod, king_model)
+        stdout = _ssh_exec(f"curl -s http://localhost:{CHAT_POD_PORT}/health")
+        if '"status": "ok"' in stdout or '"status":"ok"' in stdout:
+            server_ok = True
+        elif not eval_active:
+            # Server not responding and no eval in progress — auto-restart
+            _ensure_chat_server(king_model)
     except Exception:
         pass
 
