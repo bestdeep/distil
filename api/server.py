@@ -956,7 +956,7 @@ Each entry contains:
 - `level`: Log level (info, warn, error)
 - `msg`: Human-readable log message
 
-Entries are returned most-recent-first.
+Entries are returned chronologically (oldest first).
 """)
 def get_validator_logs(limit: int = 50):
     limit = max(1, min(limit, 200))
@@ -965,7 +965,7 @@ def get_validator_logs(limit: int = 50):
     if not isinstance(entries, list):
         entries = []
     # Most recent first, limited
-    entries = list(reversed(entries))[:limit]
+    entries = entries[-limit:]
     return JSONResponse(
         content={"entries": entries, "count": len(entries)},
         headers={"Cache-Control": "public, max-age=5, stale-while-revalidate=10"},
