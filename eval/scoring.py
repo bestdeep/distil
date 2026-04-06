@@ -104,30 +104,22 @@ def disqualify(hotkey: str, reason: str, dq: dict[str, str],
 
 
 def is_disqualified(uid: int, hotkey: str, dq: dict[str, str],
-                    commit_block: int = None, coldkey: str = None,
-                    hf_username: str = None) -> bool:
+                    commit_block: int = None, **kwargs) -> bool:
     """Check if a miner is disqualified for their current commitment.
 
-    Checks (in order):
-    1. coldkey hard ban (ban:coldkey:X — covers all hotkeys past and future)
-    2. HF username hard ban (ban:hf:X — blocks any model from this HF account)
-    3. hotkey:block (current commitment — precise match)
-    4. bare hotkey (legacy entries)
-    5. UID string (legacy entries from before hotkey migration)
+    DQ is per-hotkey per-submission only. We do NOT ban at the coldkey or
+    HF account level — miners should be able to participate fairly on
+    other keys even if one submission was DQ'd.
+
+    Checks:
+    1. hotkey:block (current commitment — precise match)
+    2. bare hotkey (legacy entries)
+    3. UID string (legacy entries from before hotkey migration)
     """
-    # Coldkey hard ban — single entry blocks ALL hotkeys under this coldkey
-    if coldkey and f"ban:coldkey:{coldkey}" in dq:
-        return True
-    # HF username hard ban — blocks any model from this HuggingFace account
-    if hf_username and f"ban:hf:{hf_username}" in dq:
-        return True
     if commit_block is not None and f"{hotkey}:{commit_block}" in dq:
         return True
     if hotkey in dq:
-        # Legacy bare-hotkey entry — but if the miner has a NEWER commit_block,
-        # check if the DQ was for an older commit (don't carry over)
-        return commit_block is None  # only match if we don't know the block
-    # Legacy: check by UID string (for old entries before hotkey migration)
+        return commit_block is None
     if str(uid) in dq:
         return commit_block is None
     return False
@@ -148,17 +140,8 @@ def is_flagged(coldkey: str = None, hf_username: str = None,
 
 
 def get_dq_reason(uid: int, hotkey: str, dq: dict[str, str],
-                  commit_block: int = None, coldkey: str = None,
-                  hf_username: str = None) -> str:
-    """Get disqualification reason by coldkey ban, HF ban, hotkey:block, hotkey, or legacy UID."""
-    if coldkey:
-        ck_key = f"ban:coldkey:{coldkey}"
-        if ck_key in dq:
-            return dq[ck_key]
-    if hf_username:
-        hf_key = f"ban:hf:{hf_username}"
-        if hf_key in dq:
-            return dq[hf_key]
+                  commit_block: int = None, **kwargs) -> str:
+    """Get disqualification reason by hotkey:block, hotkey, or legacy UID."""
     if commit_block is not None:
         key = f"{hotkey}:{commit_block}"
         if key in dq:
