@@ -66,8 +66,86 @@ PAIRED_TEST_ALPHA = 0.05   # Significance level for paired t-test dethronement
 STALE_H2H_EPOCHS = 50      # Re-test if last H2H was >N epochs ago
 TOP_N_ALWAYS_INCLUDE = 5   # king + 4 contenders always in eval
 
+# Activation fingerprint copy detection
+ACTIVATION_COPY_THRESHOLD = 0.9999  # Cosine similarity above this = functional copy
+
 # Discord announcement role
 DISTIL_ROLE_ID = "1482026585358991571"
+
+
+def _cosine_sim(a: list, b: list) -> float:
+    """Cosine similarity between two float lists."""
+    import math
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a < 1e-12 or norm_b < 1e-12:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def check_activation_fingerprint(
+    model_name: str, uid: int, fingerprint: dict, state_dir
+) -> tuple[bool, int | None, str | None, float]:
+    """
+    Compare a model's activation fingerprint against all stored fingerprints.
+    Returns (is_copy, original_uid, original_model, max_similarity).
+    """
+    fp_file = Path(state_dir) / "activation_fingerprints.json"
+    stored = {}
+    if fp_file.exists():
+        try:
+            stored = json.loads(fp_file.read_text())
+        except Exception:
+            stored = {}
+
+    layer_fps = fingerprint.get("layer_fingerprints", {})
+    if not layer_fps:
+        return False, None, None, 0.0
+
+    max_sim = 0.0
+    max_sim_uid = None
+    max_sim_model = None
+
+    for other_uid_str, other_data in stored.items():
+        other_uid = int(other_uid_str)
+        if other_uid == uid:
+            continue
+        other_fps = other_data.get("layer_fingerprints", {})
+        if not other_fps:
+            continue
+
+        # Compare matching layers
+        sims = []
+        for layer_key in layer_fps:
+            if layer_key in other_fps:
+                a = layer_fps[layer_key]
+                b = other_fps[layer_key]
+                if len(a) == len(b) and len(a) > 0:
+                    sims.append(_cosine_sim(a, b))
+
+        if sims:
+            avg_sim = sum(sims) / len(sims)
+            if avg_sim > max_sim:
+                max_sim = avg_sim
+                max_sim_uid = other_uid
+                max_sim_model = other_data.get("model", "unknown")
+
+    # Store this model's fingerprint
+    stored[str(uid)] = {
+        "model": model_name,
+        "layer_fingerprints": layer_fps,
+        "n_layers": fingerprint.get("n_layers"),
+        "hidden_size": fingerprint.get("hidden_size"),
+        "updated": time.time(),
+    }
+    try:
+        fp_file.write_text(json.dumps(stored, indent=2))
+    except Exception as e:
+        logger.warning(f"Failed to save fingerprints: {e}")
+
+    is_copy = max_sim >= ACTIVATION_COPY_THRESHOLD
+    return is_copy, max_sim_uid, max_sim_model, max_sim
 
 
 # ── Announcement ──────────────────────────────────────────────────────────
@@ -767,6 +845,27 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState,
             disqualify(hk, reason, state.dq_reasons, commit_block=cb)
             state.evaluated_uids.add(str(uid))
             continue
+
+        # Activation fingerprint copy detection
+        fp = student_result.get("activation_fingerprint")
+        if fp and fp.get("layer_fingerprints"):
+            is_copy, orig_uid, orig_model, sim = check_activation_fingerprint(
+                model_name, uid, fp, state.state_dir
+            )
+            if is_copy:
+                reason = (f"copy: activation-space duplicate of UID {orig_uid} ({orig_model}) "
+                          f"— cosine similarity {sim:.6f} > {ACTIVATION_COPY_THRESHOLD}")
+                logger.info(f"UID {uid} ({model_name}): ACTIVATION COPY — {reason}")
+                log_event(f"Activation copy detected: UID {uid} is copy of UID {orig_uid} (sim={sim:.6f})",
+                          level="warning", state_dir=str(state.state_dir))
+                state.scores[str(uid)] = MAX_KL_THRESHOLD + 1
+                hk = models_to_eval.get(uid, {}).get("hotkey", uid_to_hotkey.get(uid, str(uid)))
+                cb = models_to_eval.get(uid, {}).get("commit_block")
+                disqualify(hk, reason, state.dq_reasons, commit_block=cb)
+                state.evaluated_uids.add(str(uid))
+                continue
+            elif sim > 0.99:
+                logger.info(f"UID {uid}: high similarity to UID {orig_uid} (sim={sim:.6f}) — below threshold, monitoring")
 
         # VRAM fraud check
         if student_result.get("status") == "fraud_vram":

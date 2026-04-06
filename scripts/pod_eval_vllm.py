@@ -38,6 +38,7 @@ import json
 import time
 import argparse
 import gc
+import hashlib
 import os
 import sys
 import shutil
@@ -141,6 +142,117 @@ try:
 except Exception:
     _kl_chunk_compiled = _kl_chunk_fn
     _KL_USE_COMPILED = False
+
+
+# ── Activation fingerprinting for functional copy detection ──
+ACTIVATION_FP_SEED = 42
+ACTIVATION_FP_N_INPUTS = 5
+ACTIVATION_FP_SEQ_LEN = 64
+ACTIVATION_FP_VOCAB_SIZE = 248320  # Qwen tokenizer vocab
+
+
+def compute_activation_fingerprint(model, device="cuda"):
+    """
+    Compute an activation-space fingerprint for functional copy detection.
+
+    Runs a fixed set of random token sequences through the model and collects
+    hidden states at evenly-spaced layers. The fingerprint is a list of mean
+    activation vectors (one per layer checkpoint), which is invariant to
+    intra-layer weight reparameterization (e.g. scaling V by c, O by 1/c).
+
+    Returns dict with:
+      - "layer_fingerprints": {layer_idx: [float, ...]}  (mean hidden state per layer)
+      - "n_layers": int
+      - "hidden_size": int
+    """
+    try:
+        # Generate deterministic random inputs
+        rng = torch.Generator()
+        rng.manual_seed(ACTIVATION_FP_SEED)
+        input_ids = torch.randint(
+            0, ACTIVATION_FP_VOCAB_SIZE,
+            (ACTIVATION_FP_N_INPUTS, ACTIVATION_FP_SEQ_LEN),
+            generator=rng, device=device
+        )
+
+        # Determine layer checkpoints (4 evenly spaced)
+        n_layers = model.config.num_hidden_layers
+        checkpoints = sorted(set([
+            0,
+            n_layers // 3,
+            2 * n_layers // 3,
+            n_layers - 1,
+        ]))
+
+        # Collect activations via hooks
+        activations = {idx: [] for idx in checkpoints}
+        hooks = []
+
+        def make_hook(layer_idx):
+            def hook_fn(module, input, output):
+                # output is typically (hidden_states, ...) or just hidden_states
+                if isinstance(output, tuple):
+                    h = output[0]
+                else:
+                    h = output
+                # Mean over batch and sequence dimensions → single vector
+                activations[layer_idx].append(h.float().mean(dim=(0, 1)).detach().cpu())
+            return hook_fn
+
+        # Find the layers module
+        layers_module = None
+        for attr in ("model.layers", "transformer.h", "gpt_neox.layers"):
+            obj = model
+            try:
+                for part in attr.split("."):
+                    obj = getattr(obj, part)
+                layers_module = obj
+                break
+            except AttributeError:
+                continue
+
+        if layers_module is None:
+            print("[fingerprint] Could not find layers module", flush=True)
+            return None
+
+        for idx in checkpoints:
+            if idx < len(layers_module):
+                hooks.append(layers_module[idx].register_forward_hook(make_hook(idx)))
+
+        # Forward pass (no grad)
+        with torch.no_grad():
+            for i in range(ACTIVATION_FP_N_INPUTS):
+                _ = model(input_ids[i:i+1])
+
+        # Remove hooks
+        for h in hooks:
+            h.remove()
+
+        # Average across all inputs per layer
+        layer_fingerprints = {}
+        for idx in checkpoints:
+            if activations[idx]:
+                avg = torch.stack(activations[idx]).mean(dim=0)
+                # Truncate to first 128 dims to keep payload small
+                fp = avg[:128].tolist()
+                layer_fingerprints[str(idx)] = [round(v, 6) for v in fp]
+
+        hidden_size = model.config.hidden_size if hasattr(model.config, "hidden_size") else 0
+
+        # Cleanup
+        del input_ids, activations
+        torch.cuda.empty_cache()
+
+        print(f"[fingerprint] Computed: {len(layer_fingerprints)} layers, "
+              f"n_layers={n_layers}, hidden_size={hidden_size}", flush=True)
+        return {
+            "layer_fingerprints": layer_fingerprints,
+            "n_layers": n_layers,
+            "hidden_size": hidden_size,
+        }
+    except Exception as e:
+        print(f"[fingerprint] Error: {e}", flush=True)
+        return None
 
 
 def compute_kl(teacher_logits, student_logits):
@@ -817,6 +929,18 @@ def main():
             if is_king:
                 king_model = student
                 print(f"[eval] King loaded — stays in VRAM", flush=True)
+
+        # ── Activation fingerprint (for functional copy detection) ──
+        if student is not None:
+            try:
+                fp_start = time.time()
+                fp = compute_activation_fingerprint(student, device)
+                fp_time = time.time() - fp_start
+                if fp:
+                    results["students"].setdefault(student_name, {})["activation_fingerprint"] = fp
+                    print(f"[eval] Fingerprint computed in {fp_time:.1f}s", flush=True)
+            except Exception as e:
+                print(f"[eval] Fingerprint failed: {e}", flush=True)
 
         # ── Score: per-prompt with early stopping ──
         can_early_stop = (student_idx > 0) and (best_kl_so_far is not None)
