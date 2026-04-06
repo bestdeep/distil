@@ -1681,6 +1681,7 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 append_score_history(
                     block=current_block, timestamp=time.time(),
                     scores=valid_scores, king_uid=winner_uid, state_dir=state.state_dir,
+                    uid_to_hotkey=uid_to_hotkey,
                 )
 
             # ── Update top-4 leaderboard ──

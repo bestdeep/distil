@@ -204,8 +204,12 @@ def append_score_history(
     king_uid: int | None,
     state_dir: Path = STATE_DIR,
     max_entries: int = 500,
+    uid_to_hotkey: dict[int, str] | None = None,
 ):
-    """Append a score snapshot to history, capping at max_entries."""
+    """Append a score snapshot to history, capping at max_entries.
+
+    Optionally includes uid_to_hotkey mapping so score provenance is
+    traceable even after UID recycling."""
     history = load_score_history(state_dir)
     entry = {
         "block": block,
@@ -213,6 +217,13 @@ def append_score_history(
         "scores": {k: round(v, 6) for k, v in scores.items()},
         "king_uid": king_uid,
     }
+    # Include hotkey mapping for score traceability
+    if uid_to_hotkey:
+        # Only include hotkeys for UIDs that have scores in this entry
+        entry["hotkeys"] = {
+            k: uid_to_hotkey.get(int(k), "")[:12]
+            for k in scores if int(k) in uid_to_hotkey
+        }
     history.append(entry)
     if len(history) > max_entries:
         history = history[-max_entries:]
