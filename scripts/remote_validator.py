@@ -105,7 +105,7 @@ def _announce_new_king(new_uid, new_model, new_kl, old_uid, old_model, old_kl, s
             f"🤗 Model: [{new_model}](<https://huggingface.co/{new_model}>)\n"
             f"👑 Previous king: [{old_model}](<https://huggingface.co/{old_model}>)\n"
             f"{earnings_line}\n"
-            f"Dethronement uses one-sided paired t-test with Bonferroni correction on 180 prompts. "
+            f"Dethronement uses one-sided paired t-test (p<0.05) on 180 prompts. "
             f"Check the [mining guide](<https://github.com/unarbos/distil#mining-guide>) to get started.\n\n"
             f"📈 [Live Dashboard](<https://distil.arbos.life>)"
         ),
@@ -837,17 +837,6 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState,
     challengers = {uid: info for uid, info in models_to_eval.items() if uid != king_uid}
 
     if king_uid is not None and challengers:
-        # Bonferroni correction: count genuinely new challengers (not top-5 contenders)
-        top_contender_uids = set()
-        if king_uid is not None:
-            top_contender_uids.add(king_uid)
-            for c in (state.top4_leaderboard.get("contenders") or [])[:TOP_N_ALWAYS_INCLUDE - 1]:
-                if c.get("uid") is not None:
-                    top_contender_uids.add(c["uid"])
-        n_new_challengers = sum(1 for uid in challengers if uid not in top_contender_uids)
-        adjusted_alpha = PAIRED_TEST_ALPHA / max(n_new_challengers, 1)
-        logger.info(f"Bonferroni correction: {n_new_challengers} new challengers, α={PAIRED_TEST_ALPHA} → adjusted_α={adjusted_alpha:.6f}")
-
         for uid in challengers:
             uid_str = str(uid)
             if uid_str not in state.scores or state.scores[uid_str] <= 0 or state.scores[uid_str] > MAX_KL_THRESHOLD:
@@ -867,9 +856,9 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState,
                 n_test = len(deltas)
                 pct_better = (mean_delta / king_new_kl * 100) if king_new_kl > 0 else 0
 
-                if p_value < adjusted_alpha and mean_delta > 0:
+                if p_value < PAIRED_TEST_ALPHA and mean_delta > 0:
                     logger.info(f"UID {uid} DETHRONED king UID {king_uid}! "
-                                f"p={p_value:.6f} (α={adjusted_alpha:.6f}), delta={mean_delta:.6f} ({pct_better:.2f}%), t={t_stat:.3f}, n={n_test}")
+                                f"p={p_value:.6f}, delta={mean_delta:.6f} ({pct_better:.2f}%), t={t_stat:.3f}, n={n_test}")
                     if epsilon_dethroned_by is None or challenger_kl < state.scores.get(str(epsilon_dethroned_by), float("inf")):
                         epsilon_dethroned_by = uid
                 elif mean_delta > 0:
