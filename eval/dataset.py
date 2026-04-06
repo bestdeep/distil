@@ -108,6 +108,10 @@ def sample_prompts_from_dataset(
                 continue
             if len(text) > max_chars:
                 text = text[:max_chars]
+                # Cut at last whitespace to avoid splitting mid-word/token
+                last_space = text.rfind(' ')
+                if last_space > max_chars // 2:
+                    text = text[:last_space]
             prompts.append(text)
             if len(prompts) >= n:
                 break
@@ -146,6 +150,10 @@ def sample_prompts_from_dataset(
             continue
         if len(text) > max_chars:
             text = text[:max_chars]
+            # Cut at last whitespace to avoid splitting mid-word/token
+            last_space = text.rfind(' ')
+            if last_space > max_chars // 2:
+                text = text[:last_space]
         prompts.append(text)
         if len(prompts) >= n:
             break
@@ -191,12 +199,16 @@ def format_prompt(text: str, max_chars: int = 10000) -> str:
     if printable_count < len(text) * 0.5:
         return ""
 
-    # Truncate to max_chars at a sentence boundary
+    # Truncate to max_chars at a sentence boundary, with word boundary fallback
     if len(text) > max_chars:
         cut = text[:max_chars].rfind(". ")
         if cut > max_chars // 3:
             text = text[: cut + 1]
         else:
             text = text[:max_chars]
+            # Cut at last whitespace to avoid splitting mid-word/token
+            last_space = text.rfind(' ')
+            if last_space > max_chars // 2:
+                text = text[:last_space]
 
     return text

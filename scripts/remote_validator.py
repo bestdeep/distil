@@ -60,7 +60,7 @@ MAX_NEW_TOKENS = 512
 MAX_PROMPT_TOKENS = 1024
 
 EVAL_PROMPTS_FULL = 60    # Full eval: many models, need speed
-EVAL_PROMPTS_H2H = 120    # Head-to-head: fewer models, need precision
+EVAL_PROMPTS_H2H = 180    # Head-to-head: oversampled to compensate for MIN_COMPLETION_TOKENS filtering
 EPSILON = 0.01             # Legacy fallback if per-prompt data unavailable
 PAIRED_TEST_ALPHA = 0.05   # Significance level for paired t-test dethronement
 STALE_H2H_EPOCHS = 50      # Re-test if last H2H was >N epochs ago
@@ -105,7 +105,7 @@ def _announce_new_king(new_uid, new_model, new_kl, old_uid, old_model, old_kl, s
             f"🤗 Model: [{new_model}](<https://huggingface.co/{new_model}>)\n"
             f"👑 Previous king: [{old_model}](<https://huggingface.co/{old_model}>)\n"
             f"{earnings_line}\n"
-            f"Dethronement uses paired t-test (p<0.05) on 120 prompts. "
+            f"Dethronement uses one-sided paired t-test with Bonferroni correction on 180 prompts. "
             f"Check the [mining guide](<https://github.com/unarbos/distil#mining-guide>) to get started.\n\n"
             f"📈 [Live Dashboard](<https://distil.arbos.life>)"
         ),
@@ -163,6 +163,28 @@ def _migrate_dq_entries(state: ValidatorState, commitments: dict):
             scrubbed += 1
     if scrubbed:
         logger.info(f"Scrubbed {scrubbed} stale bare-UID DQ entries")
+
+    # Scrub stale hotkey:block entries where the model was re-committed
+    recommit_scrubbed = 0
+    for key in list(state.dq_reasons.keys()):
+        if ":" not in key or key.startswith("flag:"):
+            continue
+        parts = key.split(":", 1)
+        if len(parts) != 2:
+            continue
+        hk, blk_str = parts
+        try:
+            dq_block = int(blk_str)
+        except ValueError:
+            continue
+        current_block = hotkey_to_block.get(hk)
+        if current_block is not None and current_block != dq_block:
+            logger.info(f"Removing stale DQ for re-committed hotkey {hk[:16]}... "
+                        f"(DQ block {dq_block} → current block {current_block})")
+            del state.dq_reasons[key]
+            recommit_scrubbed += 1
+    if recommit_scrubbed:
+        logger.info(f"Scrubbed {recommit_scrubbed} stale hotkey:block DQ entries (model re-committed)")
 
 
 # ── Pre-check models ─────────────────────────────────────────────────────
@@ -815,6 +837,17 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState,
     challengers = {uid: info for uid, info in models_to_eval.items() if uid != king_uid}
 
     if king_uid is not None and challengers:
+        # Bonferroni correction: count genuinely new challengers (not top-5 contenders)
+        top_contender_uids = set()
+        if king_uid is not None:
+            top_contender_uids.add(king_uid)
+            for c in (state.top4_leaderboard.get("contenders") or [])[:TOP_N_ALWAYS_INCLUDE - 1]:
+                if c.get("uid") is not None:
+                    top_contender_uids.add(c["uid"])
+        n_new_challengers = sum(1 for uid in challengers if uid not in top_contender_uids)
+        adjusted_alpha = PAIRED_TEST_ALPHA / max(n_new_challengers, 1)
+        logger.info(f"Bonferroni correction: {n_new_challengers} new challengers, α={PAIRED_TEST_ALPHA} → adjusted_α={adjusted_alpha:.6f}")
+
         for uid in challengers:
             uid_str = str(uid)
             if uid_str not in state.scores or state.scores[uid_str] <= 0 or state.scores[uid_str] > MAX_KL_THRESHOLD:
@@ -830,14 +863,13 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState,
                     and len(king_per_prompt) >= 20):
                 deltas = [k - c for k, c in zip(king_per_prompt, challenger_per_prompt)]
                 mean_delta = sum(deltas) / len(deltas)
-                t_stat, p_two = _scipy_stats.ttest_1samp(deltas, 0.0)
-                p_value = p_two / 2 if t_stat > 0 else 1.0 - p_two / 2
+                t_stat, p_value = _scipy_stats.ttest_1samp(deltas, 0.0, alternative='greater')
                 n_test = len(deltas)
                 pct_better = (mean_delta / king_new_kl * 100) if king_new_kl > 0 else 0
 
-                if p_value < PAIRED_TEST_ALPHA and mean_delta > 0:
+                if p_value < adjusted_alpha and mean_delta > 0:
                     logger.info(f"UID {uid} DETHRONED king UID {king_uid}! "
-                                f"p={p_value:.6f}, delta={mean_delta:.6f} ({pct_better:.2f}%), t={t_stat:.3f}, n={n_test}")
+                                f"p={p_value:.6f} (α={adjusted_alpha:.6f}), delta={mean_delta:.6f} ({pct_better:.2f}%), t={t_stat:.3f}, n={n_test}")
                     if epsilon_dethroned_by is None or challenger_kl < state.scores.get(str(epsilon_dethroned_by), float("inf")):
                         epsilon_dethroned_by = uid
                 elif mean_delta > 0:
@@ -1008,7 +1040,7 @@ def _ensure_chat_server_running(model_name: str):
 def update_h2h_state(state: ValidatorState, h2h_results, king_uid, winner_uid,
                      king_h2h_kl, king_kl, king_per_prompt, current_block,
                      n_prompts, is_full_eval, uid_to_model, valid_models,
-                     challengers, epoch_count, disqualified):
+                     challengers, epoch_count, disqualified, block_hash=None):
     """Update H2H state files: latest, history, tested-against-king."""
 
     n_challenger_results = sum(1 for r in h2h_results if not r.get("is_king"))
@@ -1027,7 +1059,7 @@ def update_h2h_state(state: ValidatorState, h2h_results, king_uid, winner_uid,
                 break
 
     h2h_round = {
-        "block": current_block, "timestamp": time.time(),
+        "block": current_block, "block_hash": block_hash, "timestamp": time.time(),
         "king_uid": effective_king_uid, "king_model": effective_king_model,
         "prev_king_uid": king_uid,
         "king_h2h_kl": round(effective_king_kl, 6) if effective_king_kl else None,
@@ -1429,7 +1461,7 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 imm_h2h.sort(key=lambda x: x["kl"])
                 if imm_h2h:
                     imm_round = {
-                        "block": current_block, "timestamp": time.time(),
+                        "block": current_block, "block_hash": current_block_hash, "timestamp": time.time(),
                         "king_uid": king_uid, "prev_king_uid": king_uid,
                         "king_h2h_kl": round(imm_king_kl, 6) if imm_king_kl else None,
                         "king_global_kl": round(king_kl, 6),
@@ -1469,6 +1501,7 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 state, h2h_results, king_uid, winner_uid, king_h2h_kl, king_kl,
                 king_per_prompt, current_block, n_prompts, is_full_eval,
                 uid_to_model, valid_models, challengers, epoch_count, disqualified,
+                block_hash=current_block_hash,
             )
 
             # ── Update model tracking ──
