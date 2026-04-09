@@ -796,6 +796,35 @@ def main():
         print(f"[eval] All {len(prompts)} prompts have >={MIN_COMPLETION_TOKENS} completion tokens", flush=True)
 
     # ═══════════════════════════════════════════════════════════════════
+    # PHASE 1e: Save eval data for reproducibility
+    # ═══════════════════════════════════════════════════════════════════
+    try:
+        eval_data_path = os.path.join(os.path.dirname(args.output), "eval_data.json")
+        eval_data = []
+        for i, prompt_text in enumerate(prompts):
+            full_seq = full_sequences[i]
+            prompt_len = prompt_lens[i]
+            continuation_ids = full_seq[0, prompt_len:].tolist()
+            continuation_text = tokenizer.decode(continuation_ids, skip_special_tokens=True)
+            eval_data.append({
+                "prompt": prompt_text,
+                "continuation": continuation_text,
+                "prompt_tokens": prompt_len,
+                "continuation_tokens": len(continuation_ids),
+            })
+        with open(eval_data_path, "w") as f:
+            json.dump({
+                "teacher": args.teacher,
+                "max_new_tokens": args.max_new_tokens,
+                "block_seed": args.block_seed,
+                "n_prompts": len(prompts),
+                "data": eval_data,
+            }, f, indent=2)
+        print(f"[eval] Saved eval data ({len(prompts)} prompts) to {eval_data_path}", flush=True)
+    except Exception as e:
+        print(f"[eval] Failed to save eval data (non-fatal): {e}", flush=True)
+
+    # ═══════════════════════════════════════════════════════════════════
     # PHASE 2: Student scoring
     # ═══════════════════════════════════════════════════════════════════
 

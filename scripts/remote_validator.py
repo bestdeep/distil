@@ -820,6 +820,38 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
             state.save_progress({"active": False})
             return None
 
+    # Save pod eval log for debugging/transparency
+    try:
+        logs_dir = state.state_dir / "pod_logs"
+        logs_dir.mkdir(exist_ok=True)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        log_dest = str(logs_dir / f"eval_{ts}.log")
+        pod.download("/home/eval_output.log", log_dest)
+        # Keep only last 20 log files
+        log_files = sorted(logs_dir.glob("eval_*.log"))
+        for old in log_files[:-20]:
+            old.unlink(missing_ok=True)
+        logger.info(f"Pod eval log saved: {log_dest}")
+    except Exception as log_err:
+        logger.warning(f"Pod log retrieval failed (non-fatal): {log_err}")
+
+    # Save eval data (prompts + teacher completions) for reproducibility
+    try:
+        eval_data_dir = state.state_dir / "eval_data"
+        eval_data_dir.mkdir(exist_ok=True)
+        eval_data_dest = str(eval_data_dir / f"eval_data_{ts}.json")
+        pod.download("/home/eval_data.json", eval_data_dest)
+        # Also save as "latest" for easy API access
+        import shutil
+        shutil.copy2(eval_data_dest, str(state.state_dir / "eval_data_latest.json"))
+        # Keep only last 10 eval data files
+        data_files = sorted(eval_data_dir.glob("eval_data_*.json"))
+        for old in data_files[:-10]:
+            old.unlink(missing_ok=True)
+        logger.info(f"Eval data saved: {eval_data_dest}")
+    except Exception as data_err:
+        logger.warning(f"Eval data retrieval failed (non-fatal): {data_err}")
+
     # Check if results are usable
     try:
         with open(results_local) as f:

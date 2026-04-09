@@ -552,10 +552,11 @@ def main(model_repo, revision, run_eval, prompts, teacher_cache, dataset, king_r
                     prompt_ids = teacher_tok(prompt_text, return_tensors="pt", truncation=False).input_ids.to(teacher.device)
                     prompt_len = prompt_ids.shape[1]
 
-                    # Generate continuation
+                    # Generate continuation (matches prod: sampled decoding)
                     output_ids = teacher.generate(
                         prompt_ids, max_new_tokens=MAX_NEW_TOKENS,
-                        do_sample=False, use_cache=True,
+                        do_sample=True, temperature=0.7, top_p=0.9,
+                        use_cache=True,
                     )
                     gen_len = output_ids.shape[1] - prompt_len
 
