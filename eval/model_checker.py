@@ -358,6 +358,7 @@ def check_model_architecture(
     try:
         # 0. SECURITY: Reject repos with custom Python code files
         # This blocks exploits like tokenizer.py that monkey-patch json.dump
+        info = None  # may be set below; used later by assess_vllm_compatibility
         try:
             info = model_info(model_repo, revision=revision, files_metadata=True)
             dangerous_files = []
