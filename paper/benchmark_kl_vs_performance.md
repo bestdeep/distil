@@ -1,8 +1,9 @@
 # Does Lower KL Divergence Produce Better Models? Benchmarking SN97 Distillation Quality
 
 **Authors:** Distil SN97  
-**Date:** April 12, 2026 (v2 — updated benchmarks and methodology)  
-**Subnet:** Bittensor SN97 (Distil)
+**Date:** April 12, 2026 (v2 — full-dataset benchmarks, updated methodology)  
+**Subnet:** Bittensor SN97 (Distil)  
+**Dashboard:** [distil.arbos.life](https://distil.arbos.life) | **Chat:** [chat.arbos.life](https://chat.arbos.life)
 
 ---
 
@@ -10,7 +11,9 @@
 
 Bittensor Subnet 97 (Distil) incentivizes miners to distill Qwen3.5-35B-A3B into compact student models (≤5.25B params), scored purely on KL divergence from the teacher. A fundamental question emerges: **does optimizing for lower KL divergence actually produce a better model, or just a more faithful token-distribution mimic?**
 
-We benchmark distilled "king" models against the official Qwen3.5-4B base model across 8 standard benchmarks using full evaluation sets (no subsampling). The current king (UID 252, KL=0.066) wins **6 of 8 benchmarks**, with strong gains in reasoning (BBH +13.3%, GSM8K +8.4%), knowledge (MMLU +5.9%), and truthfulness (TruthfulQA +5.8%). The previous king (UID 170, KL=0.049) showed even larger improvements. The sole regressions are instruction following (IFEval −6.3%) and commonsense (Winogrande −0.4%). These results provide empirical evidence that KL-divergence-based distillation incentives produce genuinely more capable models — not just closer token distribution approximations.
+We benchmark distilled "king" models against the official Qwen3.5-4B base model across 8 standard benchmarks using **full evaluation sets** (no subsampling — MMLU alone uses ~14,000 questions). The king model (UID 170, KL=0.049) wins **6 of 8 benchmarks**, with strong gains in reasoning (BBH +13.3%, GSM8K +8.4%), knowledge (MMLU +5.9%), and truthfulness (TruthfulQA +5.8%). The sole regressions are instruction following (IFEval −6.3%) and commonsense (Winogrande −0.4%, within noise). These results provide empirical evidence that KL-divergence-based distillation incentives produce genuinely more capable models — not just closer token distribution approximations.
+
+The king model is freely available for interactive testing at [chat.arbos.life](https://chat.arbos.life).
 
 ## 1. Introduction
 
@@ -131,13 +134,15 @@ All models evaluated on the same GPU with the same vLLM server configuration. Th
 
 ### 4.2 Key Findings
 
-**Strong reasoning gains:** The largest improvements come in reasoning tasks — BBH (+13.3%) and GSM8K (+8.4%). This is significant because reasoning ability is arguably the most valuable capability in a language model, and these gains come purely from KL-divergence optimization, not task-specific training.
+**Strong reasoning gains:** The largest improvements come in reasoning tasks — BBH (+13.3%) and GSM8K (+8.4%). This is notable because these gains emerge purely from KL-divergence optimization against a MoE teacher, not from task-specific fine-tuning. The student appears to internalize the teacher's reasoning patterns through distributional alignment alone. BBH CoT in particular requires multi-step logical inference — the +13.3% improvement suggests the distilled model captures the teacher's chain-of-thought structure, not just surface-level token probabilities.
 
-**Knowledge retention:** MMLU (+5.9%) shows the distilled model doesn't just mimic the teacher's distribution — it actually captures more knowledge than the base model at the same parameter count. The distillation process effectively compresses 35B-teacher knowledge into the 4B student.
+**Knowledge compression:** MMLU (+5.9% across 57 subjects, ~14,000 questions) demonstrates that the distilled model retains *more* factual knowledge than the base model at the same parameter count. This is the core value proposition of SN97: competitive pressure drives miners to find distillation techniques that effectively compress 35B worth of knowledge into 4B parameters — producing models that outperform what Qwen achieved with their own official 4B release.
 
-**IFEval regression:** The sole meaningful regression (−6.3% on IFEval) is likely due to the base model's instruction-following behavior being partially overwritten by the distillation process, which optimizes for general distribution matching rather than instruction compliance. This is an expected tradeoff.
+**Truthfulness improvement:** TruthfulQA MC2 (+5.8%) is perhaps the most surprising result. The distilled model is better at resisting common misconceptions than the base model, suggesting that the teacher's calibrated uncertainty over the full vocabulary helps the student learn more nuanced probability distributions over factual claims.
 
-**Winogrande within noise:** The −0.4% Winogrande difference is within statistical noise and not meaningful.
+**IFEval regression:** The −6.3% on IFEval (instruction-following format compliance) is the expected tradeoff of distribution-matching distillation. The base model's post-training instruction alignment gets partially overwritten when optimizing for general KL divergence. Future work could explore hybrid objectives that preserve instruction-following while minimizing KL.
+
+**Winogrande within noise:** The −0.4% difference is within the standard error for this benchmark size and is not meaningful.
 
 ### 4.3 KL Divergence vs Performance Correlation
 
@@ -166,7 +171,7 @@ This means a challenger must demonstrate consistently lower KL divergence across
 ### 5.2 Anti-Exploitation Measures
 
 - **Revision pinning:** Models are evaluated at the specific committed revision to prevent post-commit weight swaps
-- **Integrity verification:** Weight hashes checked every epoch; models must remain publicly accessible
+- **Revision-based integrity:** HuggingFace repo git SHA is tracked — any new commit to the repo after evaluation triggers DQ (cheaper and faster than re-hashing weights)
 - **Architecture enforcement:** All models must use `Qwen3_5ForConditionalGeneration` for vLLM compatibility
 - **Fresh score requirement:** Kings must produce a fresh score every round or lose the crown to the best challenger
 
@@ -199,9 +204,11 @@ The competitive dynamics of SN97 drive continuous improvement. The king model ha
 
 ## 7. Conclusion
 
-KL divergence optimization in SN97 produces student models that are genuinely more capable than the base model at the same parameter count. The current king (UID 170, KL=0.049) outperforms Qwen3.5-4B on 6 of 8 standard benchmarks, with particularly strong gains in reasoning (+13.3% BBH, +8.4% GSM8K) and knowledge (+5.9% MMLU). These results validate that SN97's simple, measurable incentive mechanism translates to real-world model quality improvements.
+KL divergence optimization in SN97 produces student models that are genuinely more capable than the base model at the same parameter count. The king model outperforms Qwen's own 4B release on 6 of 8 standard benchmarks, with particularly strong gains in reasoning (+13.3% BBH, +8.4% GSM8K) and knowledge (+5.9% MMLU across ~14,000 questions). These results validate that SN97's simple, measurable incentive mechanism translates to real-world model quality improvements.
 
-The subnet effectively crowdsources distillation research: miners compete to compress a 35B teacher into a 4B student, and the competitive pressure produces models that capture teacher knowledge more effectively than official distillation baselines. As the competition matures and techniques improve, we expect these gains to grow further.
+The subnet effectively crowdsources distillation research: miners compete to compress a 35B MoE teacher into a 4B student, and the competitive pressure produces models that capture teacher knowledge more effectively than Qwen's official distillation. The current king model can be tested interactively at [chat.arbos.life](https://chat.arbos.life).
+
+As the competition matures — with 11 king changes in the first two weeks and increasingly sophisticated distillation techniques from miners — we expect these gains to continue growing. The combination of economic incentives, statistical rigor (p<0.01 dethronement), and anti-exploitation measures (revision pinning, continuous integrity checks) creates a robust framework for decentralized model improvement.
 
 ---
 
