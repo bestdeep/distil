@@ -310,33 +310,25 @@ def precheck_all_models(commitments, uid_to_hotkey, uid_to_coldkey,
         this_commit_block = commit.get("block")
 
         # Check DQ (per-hotkey per-submission only)
-        integrity_recheck = False
         if is_disqualified(uid, hotkey, state.dq_reasons, commit_block=this_commit_block):
             reason = get_dq_reason(uid, hotkey, state.dq_reasons, commit_block=this_commit_block)
-            # Integrity DQs (404, weight change) are recoverable — re-verify each epoch
-            # instead of permanently blocking. Model may have come back online.
-            if reason and reason.startswith("integrity:"):
-                logger.info(f"UID {uid} ({model_repo}): Integrity DQ — re-verifying: {reason}")
-                integrity_recheck = True
-                # Fall through to integrity check below instead of skipping
-            else:
-                logger.info(f"UID {uid} ({model_repo}): DISQUALIFIED — {reason}")
-                disqualified.add(uid)
-                continue
-
-        # Already permanently DQ'd (skip for integrity rechecks)
-        if not integrity_recheck and state.scores.get(str(uid), 0) > MAX_KL_THRESHOLD:
+            logger.info(f"UID {uid} ({model_repo}): DISQUALIFIED — {reason}")
             disqualified.add(uid)
             continue
 
-        if not integrity_recheck and is_stale(uid, state.failures):
+        # Already permanently DQ'd
+        if state.scores.get(str(uid), 0) > MAX_KL_THRESHOLD:
+            disqualified.add(uid)
+            continue
+
+        if is_stale(uid, state.failures):
             logger.debug(f"UID {uid}: stale (too many failures), skipping")
             disqualified.add(uid)
             continue
 
         # For already-evaluated UIDs, still verify architecture (lightweight config.json check)
         uid_str = str(uid)
-        if (not integrity_recheck and uid_str in state.evaluated_uids and uid_str in state.scores
+        if (uid_str in state.evaluated_uids and uid_str in state.scores
                 and state.scores[uid_str] <= MAX_KL_THRESHOLD):
             # Re-verify architecture (lightweight config.json check)
             try:
@@ -468,19 +460,6 @@ def precheck_all_models(commitments, uid_to_hotkey, uid_to_coldkey,
             state.model_hashes[f"{uid}_hotkey"] = hotkey
             state.save_model_hashes()
 
-        # If this was an integrity recheck and the model passed, clear the old DQ
-        if integrity_recheck:
-            dq_key = f"{hotkey}:{this_commit_block}" if this_commit_block else hotkey
-            if dq_key in state.dq_reasons:
-                logger.info(f"UID {uid}: Integrity recovered — clearing DQ: {state.dq_reasons[dq_key][:80]}")
-                del state.dq_reasons[dq_key]
-            # Reset score so model can be re-evaluated
-            state.scores.pop(str(uid), None)
-            state.evaluated_uids.discard(str(uid))
-            # Clear failure count
-            state.failures.pop(uid, None)
-            state.failures.pop(str(uid), None)
-
         valid_models[uid] = {
             "model": model_repo, "revision": revision,
             "params_b": check.get("params_b", 0),
@@ -489,7 +468,7 @@ def precheck_all_models(commitments, uid_to_hotkey, uid_to_coldkey,
             "vllm_compatible": check.get("vllm_compatible"),
             "vllm_reason": check.get("vllm_reason"),
         }
-        logger.info(f"UID {uid}: {model_repo} ({check.get('params_b', 0):.2f}B) ✓{' (recovered from integrity DQ)' if integrity_recheck else ''}")
+        logger.info(f"UID {uid}: {model_repo} ({check.get('params_b', 0):.2f}B) ✓")
 
     return valid_models, disqualified
 
