@@ -684,6 +684,7 @@ def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=163
         "--enable-prefix-caching",
         "--no-enable-log-requests",
         "--reasoning-parser", "qwen3",
+        "--max-logprobs", "128",
     ]
 
     log_f = open("/tmp/vllm_teacher.log", "w")
@@ -1077,6 +1078,11 @@ def main():
 
     if not teacher_cache_loaded:
         # ── Pure HF fallback ──
+        # Safety: ensure vLLM is killed before loading HF teacher
+        stop_vllm_server()
+        time.sleep(3)
+        free_gpu()
+
         print(f"\n{'='*60}", flush=True)
         print(f"PHASE 1 FALLBACK: HF teacher generation + logit extraction", flush=True)
         print(f"{'='*60}", flush=True)
