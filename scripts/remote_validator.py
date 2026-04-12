@@ -66,6 +66,10 @@ PAIRED_TEST_ALPHA = 0.02   # Significance level for paired t-test dethronement (
 STALE_H2H_EPOCHS = 50      # Re-test if last H2H was >N epochs ago
 TOP_N_ALWAYS_INCLUDE = 2   # king + 1 top contender always in eval
 
+# Reference model (base, undistilled) — included in every eval for baseline comparison
+REFERENCE_MODEL = "Qwen/Qwen3.5-35B-A3B"  # Same as teacher — KL should be 0
+REFERENCE_UID = -1  # Synthetic UID, never written to scores/weights
+
 # Activation fingerprint copy detection
 ACTIVATION_COPY_THRESHOLD = 0.9999  # Cosine similarity above this = functional copy
 
@@ -909,6 +913,13 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState,
         if uid is None:
             continue
 
+        # Reference model — log but don't affect scores/weights/state
+        is_reference = models_to_eval.get(uid, {}).get("is_reference", False)
+        if is_reference:
+            ref_kl = student_result.get("kl_global_avg", "error")
+            logger.info(f"REFERENCE ({model_name}): KL={ref_kl} (baseline — not scored)")
+            continue
+
         if "error" in student_result:
             logger.warning(f"UID {uid} ({model_name}): eval error — {student_result['error']}")
             record_failure(uid, state.failures)
@@ -1190,6 +1201,9 @@ def _build_h2h_results(results, models_to_eval, king_uid, king_h2h_kl,
         entry = {"uid": uid, "model": model_name, "kl": round(kl, 6), "is_king": is_king, "vs_king": vs_king}
         if t_test_info:
             entry["t_test"] = t_test_info
+        if info.get("is_reference"):
+            entry["is_reference"] = True
+            entry["vs_king"] = "baseline (undistilled)"
         h2h_results.append(entry)
     h2h_results.sort(key=lambda x: x["kl"])
     return h2h_results
@@ -1652,7 +1666,16 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
             for uid, info in challengers.items():
                 models_to_eval[uid] = info
 
-            n_challengers_in_eval = sum(1 for uid in models_to_eval if uid != king_uid)
+            # Inject reference (base) model for baseline comparison
+            if REFERENCE_MODEL and REFERENCE_UID not in models_to_eval:
+                models_to_eval[REFERENCE_UID] = {
+                    "model": REFERENCE_MODEL,
+                    "commit_block": 0,
+                    "hotkey": "reference",
+                    "is_reference": True,
+                }
+
+            n_challengers_in_eval = sum(1 for uid in models_to_eval if uid != king_uid and uid != REFERENCE_UID)
             if n_challengers_in_eval == 0:
                 logger.info(f"No challengers in eval batch — king UID {king_uid} holds")
                 state.save()
