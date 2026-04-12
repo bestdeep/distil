@@ -1198,9 +1198,9 @@ def _build_h2h_results(results, models_to_eval, king_uid, king_h2h_kl,
 
 # ── Chat server management ────────────────────────────────────────────────
 
-# Chat-king pod config (from lium)
-CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "91.224.44.81")
-CHAT_POD_SSH_PORT = os.environ.get("CHAT_POD_SSH_PORT", "20300")
+# Eval pod config (serves both eval and chat via vLLM)
+CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "213.13.7.110")
+CHAT_POD_SSH_PORT = os.environ.get("CHAT_POD_SSH_PORT", "6039")
 CHAT_POD_APP_PORT = 8100
 
 
@@ -1232,6 +1232,21 @@ def _restart_chat_server(model_name: str):
         logger.info("Chat server restart initiated")
     except Exception as e:
         logger.warning(f"Failed to restart chat server: {e}")
+
+
+def _trigger_benchmarks(model_name: str, king_uid: int):
+    """Trigger auto-benchmarks on the eval pod for a new king model (background)."""
+    logger.info(f"Triggering auto-benchmarks for UID {king_uid} ({model_name})")
+    try:
+        # Run in background — benchmarks take hours, don't block the validator
+        _chat_ssh(
+            f"KING_UID={king_uid} MODEL='{model_name}' RESULTS_DIR=/root/benchmark_results "
+            f"nohup /root/auto_benchmark.sh '{model_name}' {king_uid} > /root/benchmark.log 2>&1 &",
+            timeout=10,
+        )
+        logger.info(f"Benchmark trigger sent for UID {king_uid}")
+    except Exception as e:
+        logger.warning(f"Failed to trigger benchmarks: {e}")
 
 
 def _ensure_chat_server_running(model_name: str):
@@ -1313,6 +1328,8 @@ def update_h2h_state(state: ValidatorState, h2h_results, king_uid, winner_uid,
     # Auto-restart chat server with new king model
     if king_changed and effective_king_model:
         _restart_chat_server(effective_king_model)
+        # Auto-trigger benchmarks for new king
+        _trigger_benchmarks(effective_king_model, effective_king_uid)
     elif not king_changed:
         # Even if king didn't change, ensure chat server is running with correct model
         _ensure_chat_server_running(effective_king_model)

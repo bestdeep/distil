@@ -869,6 +869,32 @@ def get_history(limit: int = 50):
     )
 
 
+@app.get("/api/benchmarks", tags=["Evaluation"], summary="Benchmark results for king models",
+         description="Returns benchmark scores for evaluated king models. Scores are from lm-eval-harness full eval sets.")
+def get_benchmarks():
+    benchmarks_dir = os.path.join(STATE_DIR, "benchmarks")
+    if not os.path.exists(benchmarks_dir):
+        return JSONResponse(content={"models": [], "baseline": None}, headers={"Cache-Control": "public, max-age=60"})
+    models = []
+    baseline = None
+    for fname in sorted(os.listdir(benchmarks_dir)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(benchmarks_dir, fname)) as f:
+                data = json.load(f)
+            if data.get("is_baseline"):
+                baseline = data
+            else:
+                models.append(data)
+        except Exception:
+            pass
+    return JSONResponse(
+        content=_sanitize_floats({"models": models, "baseline": baseline}),
+        headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=120"},
+    )
+
+
 @app.get("/api/health", tags=["Overview"], summary="Service health and quick status",
          description="""One-stop health check that returns the current state of the validator and subnet.
 
