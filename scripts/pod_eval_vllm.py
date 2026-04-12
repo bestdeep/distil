@@ -879,7 +879,7 @@ def main():
         "block_seed": args.block_seed,
         "n_prompts": len(prompts),
         "n_prompts_filtered": 0,  # No post-generation filtering in v3
-        "min_completion_tokens": MIN_COMPLETION_TOKENS,
+        "min_completion_tokens": 0,  # No post-generation filtering in v3
         "students": {},
     }
     for name, data in prior_results.items():
