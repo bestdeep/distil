@@ -665,26 +665,9 @@ def check_model_architecture(
                 "vocab_size": vocab_size,
             }
 
-        # 7a. Verify tokenizer files match teacher byte-for-byte
-        try:
-            tok_files_match = verify_tokenizer_files(model_repo, revision)
-            if not tok_files_match["match"]:
-                return {
-                    "pass": False,
-                    "reason": f"Tokenizer file mismatch: {tok_files_match['reason']}",
-                    "params_b": total_params_b,
-                    "vocab_size": vocab_size,
-                }
-        except Exception as tok_file_err:
-            if _is_transient_error(tok_file_err):
-                logger.warning(f"Tokenizer file check transient error for {model_repo}: {tok_file_err} (allowing)")
-            else:
-                return {
-                    "pass": False,
-                    "reason": f"Tokenizer file verification failed (fail-closed): {tok_file_err}",
-                    "params_b": total_params_b,
-                    "vocab_size": vocab_size,
-                }
+        # 7a. Tokenizer file hash check REMOVED — different transformers versions
+        # materialize extra_special_tokens into tokenizer.json differently (cosmetic).
+        # The encoding-based check below is sufficient to verify identical behavior.
 
         # 7b. Verify tokenizer produces identical encodings as teacher
         try:
