@@ -1199,8 +1199,8 @@ def _build_h2h_results(results, models_to_eval, king_uid, king_h2h_kl,
 # ── Chat server management ────────────────────────────────────────────────
 
 # Separate chat-bench pod (dedicated 1×RTX4090 for chat + benchmarks)
-CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "91.224.44.207")
-CHAT_POD_SSH_PORT = os.environ.get("CHAT_POD_SSH_PORT", "40070")
+CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "178.132.148.6")
+CHAT_POD_SSH_PORT = os.environ.get("CHAT_POD_SSH_PORT", "56300")
 CHAT_POD_APP_PORT = 8100
 
 
