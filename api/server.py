@@ -736,6 +736,13 @@ def get_h2h_history(limit: int = 50, page: int = 1):
         try:
             with open(path) as f:
                 data = json.load(f)
+            # Annotate exploit rounds: king_changed but new_king not in results
+            for entry in data:
+                if entry.get("king_changed") and entry.get("new_king_uid"):
+                    result_uids = [r.get("uid") for r in entry.get("results", [])]
+                    if entry["new_king_uid"] not in result_uids:
+                        entry["_exploit"] = True
+                        entry["_exploit_note"] = "King promoted from cached scores without evaluation this round (fixed in 579b17b)"
             total = len(data)
             # Reverse so newest first, then paginate
             data_rev = list(reversed(data))
@@ -786,14 +793,20 @@ def get_king_history():
         margin = None
         if king_kl is not None and prev_kl is not None and prev_kl > 0:
             margin = round((prev_kl - king_kl) / prev_kl, 6)
-        changes.append({
+        # Detect exploit rounds: new king not in results
+        result_uids = [r.get("uid") for r in entry.get("results", [])]
+        is_exploit = new_king_uid not in result_uids and entry.get("king_changed")
+        change = {
             "block": entry.get("block"),
             "timestamp": entry.get("timestamp"),
             "king_uid": new_king_uid,
             "king_model": king_model,
             "dethroned_uid": prev_king_uid,
             "margin": margin,
-        })
+        }
+        if is_exploit:
+            change["_exploit"] = True
+        changes.append(change)
     return changes
 
 
