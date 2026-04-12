@@ -1639,6 +1639,7 @@ def chat_status():
 
     # Try health check on pod
     server_ok = False
+    remote_health = {}
     try:
         stdout = _ssh_exec(f"curl -fsS http://localhost:{CHAT_POD_PORT}/v1/models")
         if stdout and (king_model is None or king_model in stdout):
@@ -1649,13 +1650,26 @@ def chat_status():
     except Exception:
         pass
 
+    try:
+        raw = _ssh_exec("cat /root/chat_health.json 2>/dev/null || true")
+        if raw and raw.strip():
+            remote_health = json.loads(raw)
+    except Exception:
+        remote_health = {}
+
+    note = "King model is loaded on GPU and ready for chat." if server_ok else "Chat server is starting or unavailable."
+    if remote_health.get("phase") and not server_ok:
+        detail = remote_health.get("detail") or remote_health.get("phase")
+        note = f"Chat server bootstrap in progress: {detail}."
+
     return {
         "available": server_ok and king_uid is not None,
         "king_uid": king_uid,
         "king_model": king_model,
         "eval_active": eval_active,
         "server_running": server_ok,
-        "note": "King model is loaded on GPU and ready for chat." if server_ok else "Chat server is starting or unavailable.",
+        "startup": remote_health,
+        "note": note,
     }
 
 

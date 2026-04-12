@@ -549,6 +549,10 @@ def main():
     parser.add_argument("--vllm-gpu-util", type=float, default=0.90,
                         help="vLLM GPU memory utilization (default 0.90)")
     parser.add_argument("--vllm-max-model-len", type=int, default=16384)
+    parser.add_argument("--max-logit-len", type=int, default=2048,
+                        help="Max total sequence length for HF logit extraction. "
+                             "Longer sequences are truncated to prompt + this many completion tokens. "
+                             "Prevents Phase 1b hangs on 8192-token completions.")
     # Backward-compatible args (ignored)
     parser.add_argument("--gpu", type=int, default=None, help="Ignored — kept for backward compat")
     parser.add_argument("--sequential", action="store_true", help="Ignored — kept for backward compat")
@@ -672,11 +676,18 @@ def main():
             print(f"[eval] HF teacher loaded in {timings['teacher_hf_load']:.1f}s, VRAM: {gpu_mem_str()}", flush=True)
 
             _write_phase(progress_path, students, "teacher_logits", teacher_done=0, prompts_total=len(prompts))
+            max_logit_len = getattr(args, 'max_logit_len', 2048)
+            n_truncated = 0
             t0 = time.time()
             with torch.no_grad():
                 for i, data in enumerate(sequences_data):
                     full_ids = data["full_ids"].to(device)
                     prompt_len = data["prompt_len"]
+                    gen_len = full_ids.shape[1] - prompt_len
+                    # Truncate long completions to avoid HF forward pass hanging
+                    if gen_len > max_logit_len:
+                        full_ids = full_ids[:, :prompt_len + max_logit_len]
+                        n_truncated += 1
                     prompt_lens.append(prompt_len)
                     full_sequences.append(full_ids)
                     logits = teacher(full_ids).logits.float()
@@ -686,6 +697,8 @@ def main():
                     if (i + 1) % 10 == 0 or i == len(sequences_data) - 1:
                         print(f"  Logits [{i+1}/{len(sequences_data)}], VRAM: {gpu_mem_str()}", flush=True)
                     _write_phase(progress_path, students, "teacher_logits", teacher_done=i + 1, prompts_total=len(prompts))
+            if n_truncated:
+                print(f"[eval] Truncated {n_truncated}/{len(sequences_data)} sequences to {max_logit_len} completion tokens", flush=True)
 
             timings["teacher_logits_pass"] = time.time() - t0
             print(f"[eval] Logits extracted in {timings['teacher_logits_pass']:.1f}s", flush=True)
