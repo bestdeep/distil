@@ -1504,15 +1504,93 @@ def get_commitment_by_hotkey(hotkey: str):
     )
 
 
+@app.get("/api/compare", tags=["Miners"], summary="Compare two or more miners",
+         description="""Compare KL scores and H2H history for multiple UIDs side by side.
+
+Usage: `/api/compare?uids=2,34,36,218`
+
+Returns for each UID:
+- Current KL score
+- Model name
+- Number of H2H rounds participated
+- Best KL ever achieved
+- Win/loss record vs king
+""")
+def compare_miners(uids: str):
+    uid_list = [int(u.strip()) for u in uids.split(",") if u.strip().isdigit()][:10]
+    if not uid_list:
+        return JSONResponse(status_code=400, content={"error": "Provide ?uids=1,2,3"})
+
+    scores = _safe_json_load(os.path.join(STATE_DIR, "scores.json"), {})
+    uid_map = _safe_json_load(os.path.join(STATE_DIR, "uid_hotkey_map.json"), {})
+    commitments_data = _get_stale("commitments") or {}
+    commitments = commitments_data.get("commitments", {})
+    h2h_history = _safe_json_load(os.path.join(STATE_DIR, "h2h_history.json"), [])
+    h2h_latest = _safe_json_load(os.path.join(STATE_DIR, "h2h_latest.json"), {})
+    dq = _safe_json_load(os.path.join(STATE_DIR, "disqualified.json"), {})
+
+    result = []
+    for uid in uid_list:
+        entry = {"uid": uid, "kl_score": scores.get(str(uid))}
+
+        # Model name
+        hotkey = uid_map.get(str(uid))
+        if hotkey and hotkey in commitments:
+            c = commitments[hotkey]
+            entry["model"] = c.get("model") or c.get("repo")
+        else:
+            entry["model"] = None
+
+        # Is king?
+        entry["is_king"] = h2h_latest.get("king_uid") == uid
+
+        # DQ status
+        entry["disqualified"] = str(uid) in dq or (hotkey and hotkey in dq)
+
+        # H2H stats
+        rounds_participated = 0
+        best_kl = None
+        wins_vs_king = 0
+        losses_vs_king = 0
+        for rnd in h2h_history:
+            for r in rnd.get("results", []):
+                if r.get("uid") == uid:
+                    rounds_participated += 1
+                    kl = r.get("kl")
+                    if kl is not None and (best_kl is None or kl < best_kl):
+                        best_kl = kl
+                    if r.get("is_king"):
+                        if rnd.get("king_changed") and rnd.get("new_king_uid") != uid:
+                            losses_vs_king += 1
+                        else:
+                            wins_vs_king += 1
+                    else:
+                        if rnd.get("king_changed") and rnd.get("new_king_uid") == uid:
+                            wins_vs_king += 1
+                    break
+
+        entry["rounds_participated"] = rounds_participated
+        entry["best_kl"] = best_kl
+        entry["wins"] = wins_vs_king
+        entry["losses"] = losses_vs_king
+        result.append(entry)
+
+    result.sort(key=lambda x: x.get("kl_score") or 999)
+    return JSONResponse(
+        content=_sanitize_floats({"miners": result}),
+        headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"},
+    )
+
+
 # ── Chat with king model ──────────────────────────────────────────────────────
 
 
 # Chat server runs on the GPU pod at port 8100 (scripts/chat_server.py).
 # We proxy requests via direct SSH + curl (no lium dependency).
 CHAT_POD_PORT = 8100
-CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "91.224.44.81")
-CHAT_POD_SSH_PORT = int(os.environ.get("CHAT_POD_SSH_PORT", "20300"))
-CHAT_POD_SSH_KEY = os.environ.get("CHAT_POD_SSH_KEY", "/home/distil/.ssh/id_ed25519")
+CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "91.224.44.207")
+CHAT_POD_SSH_PORT = int(os.environ.get("CHAT_POD_SSH_PORT", "40070"))
+CHAT_POD_SSH_KEY = os.environ.get("CHAT_POD_SSH_KEY", "/root/.ssh/id_ed25519")
 
 
 def _get_king_info():
