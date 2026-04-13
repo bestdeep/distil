@@ -573,20 +573,67 @@ print(json.dumps(result))
          description="Returns the top-4 leaderboard - current king and contenders. Dethronement uses paired t-test (p < 0.05).")
 def get_leaderboard():
     top4 = _safe_json_load(os.path.join(STATE_DIR, "top4_leaderboard.json"), {}) or {}
+    scores = _safe_json_load(os.path.join(STATE_DIR, "scores.json"), {})
+    h2h_latest = _safe_json_load(os.path.join(STATE_DIR, "h2h_latest.json"), {})
+    uid_map = _safe_json_load(os.path.join(STATE_DIR, "uid_hotkey_map.json"), {})
+    commitments_data = _get_stale("commitments") or {}
+    commitments = commitments_data.get("commitments", {})
+    cumulative = _safe_json_load(os.path.join(STATE_DIR, "cumulative_scores.json"), {})
+
+    def _enrich(entry):
+        """Fill in model name and KL from live state if missing."""
+        if not entry:
+            return entry
+        uid = entry.get("uid")
+        if uid is None:
+            return entry
+        # Model name
+        if not entry.get("model"):
+            hotkey = uid_map.get(str(uid))
+            if hotkey and hotkey in commitments:
+                c = commitments[hotkey]
+                entry["model"] = c.get("model") or c.get("repo")
+        # KL score
+        if not entry.get("h2h_kl") and str(uid) in scores:
+            entry["h2h_kl"] = scores[str(uid)]
+        # Cumulative score
+        cum = cumulative.get(str(uid))
+        if cum and isinstance(cum, dict):
+            entry["cumulative_score"] = cum.get("cumulative_kl_diff")
+            entry["cumulative_rounds"] = cum.get("rounds")
+        return entry
+
+    king_data = dict(top4.get("king") or {}) if top4.get("king") else None
+    # Override king from h2h_latest if top4 is stale
+    if h2h_latest.get("king_uid") is not None:
+        if not king_data or king_data.get("uid") != h2h_latest["king_uid"]:
+            king_data = {"uid": h2h_latest["king_uid"], "kl": h2h_latest.get("king_kl")}
+    king_data = _enrich(king_data)
+
+    contenders = [_enrich(dict(c)) for c in (top4.get("contenders") or [])]
+    # Filter out reference model (UID -1) and king from contenders
+    king_uid = king_data.get("uid") if king_data else None
+    contenders = [c for c in contenders if c.get("uid") not in (-1, king_uid)]
+    # If contenders are empty or stale, rebuild from scores
+    if not contenders or not any(c.get("h2h_kl") for c in contenders):
+        scored = [(int(uid), kl) for uid, kl in scores.items()
+                  if int(uid) not in (-1, king_uid or -999) and kl is not None]
+        scored.sort(key=lambda x: x[1])
+        contenders = [_enrich({"uid": uid, "h2h_kl": kl}) for uid, kl in scored[:4]]
 
     leaderboard = {
-        "king": dict(top4.get("king") or {}) if top4.get("king") else None,
-        "contenders": [dict(c) for c in (top4.get("contenders") or [])],
+        "king": king_data,
+        "contenders": contenders,
         "phase": top4.get("phase", "unknown"),
         "initial_eval_complete": top4.get("initial_eval_complete", False),
         "completed_at": top4.get("completed_at"),
     }
 
     return JSONResponse(
-        content={
+        content=_sanitize_floats({
             "leaderboard": leaderboard,
             "phase": leaderboard["phase"],
-        },
+        }),
         headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"},
     )
 
