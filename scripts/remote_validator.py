@@ -1313,8 +1313,8 @@ def _build_h2h_results(results, models_to_eval, king_uid, king_h2h_kl,
 # ── Chat server management ────────────────────────────────────────────────
 
 # Separate chat-bench pod (dedicated 1×RTX4090 for chat + benchmarks)
-CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "178.132.148.6")
-CHAT_POD_SSH_PORT = os.environ.get("CHAT_POD_SSH_PORT", "40299")
+CHAT_POD_HOST = os.environ.get("CHAT_POD_HOST", "91.224.44.207")
+CHAT_POD_SSH_PORT = os.environ.get("CHAT_POD_SSH_PORT", "40070")
 CHAT_POD_APP_PORT = 8100
 
 
@@ -1334,16 +1334,27 @@ def _chat_ssh(cmd: str, timeout: int = 30) -> str:
 
 
 def _restart_chat_server(model_name: str):
-    """Kill old chat server and start with new king model."""
+    """Kill old vLLM chat server and start with new king model."""
     logger.info(f"Restarting chat server with new king: {model_name}")
     try:
-        _chat_ssh("pkill -f 'vllm.entrypoints.openai.api_server|chat_server.py' || true", timeout=10)
-        time.sleep(2)
+        _chat_ssh("pkill -9 -f 'vllm.entrypoints.openai.api_server' || true", timeout=10)
+        time.sleep(3)
+        # Download model first so vLLM doesn't timeout during startup
         _chat_ssh(
-            f"nohup python3 /root/chat_server.py '{model_name}' {CHAT_POD_APP_PORT} > /root/chat.log 2>&1 &",
+            f"python3 -c \"from huggingface_hub import snapshot_download; "
+            f"snapshot_download('{model_name}')\" 2>/dev/null || true",
+            timeout=300,
+        )
+        # Start vLLM with same flags as current production setup
+        _chat_ssh(
+            f"nohup python3 -m vllm.entrypoints.openai.api_server "
+            f"--model '{model_name}' --served-model-name '{model_name}' "
+            f"--port {CHAT_POD_APP_PORT} --max-model-len 8192 --dtype bfloat16 "
+            f"--trust-remote-code --enforce-eager --reasoning-parser qwen3 "
+            f"--skip-mm-profiling > /root/chat_vllm.log 2>&1 &",
             timeout=10,
         )
-        logger.info("Chat server restart initiated")
+        logger.info("Chat vLLM server restart initiated")
     except Exception as e:
         logger.warning(f"Failed to restart chat server: {e}")
 
@@ -1369,18 +1380,10 @@ def _ensure_chat_server_running(model_name: str):
         stdout = _chat_ssh(f"curl -fsS http://localhost:{CHAT_POD_APP_PORT}/v1/models || echo not_running", timeout=10)
         if "not_running" in stdout:
             logger.info(f"Chat server not running, starting with {model_name}")
-            _chat_ssh(
-                f"nohup python3 /root/chat_server.py '{model_name}' {CHAT_POD_APP_PORT} > /root/chat.log 2>&1 &",
-                timeout=10,
-            )
+            _restart_chat_server(model_name)
         elif model_name not in stdout:
             logger.info(f"Chat server running wrong model, restarting with {model_name}")
-            _chat_ssh("pkill -f 'vllm.entrypoints.openai.api_server|chat_server.py' || true", timeout=10)
-            time.sleep(2)
-            _chat_ssh(
-                f"nohup python3 /root/chat_server.py '{model_name}' {CHAT_POD_APP_PORT} > /root/chat.log 2>&1 &",
-                timeout=10,
-            )
+            _restart_chat_server(model_name)
     except Exception as e:
         logger.debug(f"Chat server check failed: {e}")
 
