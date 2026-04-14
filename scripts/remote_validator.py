@@ -232,9 +232,10 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
             cap_challengers(challengers, state, king_uid)
 
             has_new_challengers = len(challengers_before_top5) > 0
-            if not challengers or not has_new_challengers:
-                log_event(f"No new challengers (before_top5={len(challengers_before_top5)}, after_all={len(challengers)})", state_dir=state_dir)
-                logger.info(f"No new challengers, king UID {king_uid} (KL={king_kl:.6f}) holds")
+            top5_only = not has_new_challengers and len(challengers) > 0
+            if not challengers:
+                log_event(f"No challengers at all (before_top5={len(challengers_before_top5)}, after_all={len(challengers)})", state_dir=state_dir)
+                logger.info(f"No challengers, king UID {king_uid} (KL={king_kl:.6f}) holds")
                 if king_uid is not None:
                     weights = [0.0] * max(n_uids, king_uid + 1)
                     weights[king_uid] = 1.0
@@ -244,6 +245,10 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                     break
                 time.sleep(60)
                 continue
+
+            if top5_only:
+                log_event(f"Top-5 only round: {len(challengers)} contender(s), no new P1/P3", state_dir=state_dir)
+                logger.info(f"Running top-5-only round with {len(challengers)} contender(s)")
 
             # ── Phase 3: GPU evaluation ──
             models_to_eval = {}

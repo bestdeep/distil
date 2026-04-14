@@ -509,6 +509,9 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
     # Kill any existing eval process before starting a new one
     try:
         existing = pod.exec("pgrep -c -f pod_eval 2>/dev/null || echo 0", timeout=10)
+        if isinstance(existing, dict):
+            existing = existing.get('stdout', existing.get('output', '0'))
+        existing = str(existing)
         count = int(existing.strip().split('\n')[-1])
         if count > 0:
             logger.warning(f"Found {count} existing eval process(es) on pod — killing before new round")
