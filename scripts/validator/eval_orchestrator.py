@@ -242,6 +242,30 @@ def precheck_all_models(commitments, uid_to_hotkey, uid_to_coldkey,
             else:
                 register_model_hash(model_hash, uid, state.state_dir)
 
+        # Shard-invariant copy detection: compare against king to catch re-sharded copies
+        # before GPU eval (saves GPU time vs only checking at pre-dethronement)
+        king_uid_for_copy = state.h2h_latest.get("king_uid") if state.h2h_latest else None
+        king_model_for_copy = state.h2h_latest.get("king_model", "") if state.h2h_latest else ""
+        if king_uid_for_copy is not None and uid != king_uid_for_copy and king_model_for_copy:
+            try:
+                challenger_tmh = compute_tensor_metadata_hash(model_repo, revision)
+                king_tmh = compute_tensor_metadata_hash(king_model_for_copy)
+                if challenger_tmh and king_tmh and challenger_tmh == king_tmh:
+                    logger.warning(
+                        f"UID {uid} ({model_repo}): BLOCKED — shard-invariant hash identical to king "
+                        f"UID {king_uid_for_copy} ({king_model_for_copy}). Re-sharded copy detected in precheck."
+                    )
+                    state.scores[str(uid)] = MAX_KL_THRESHOLD + 1
+                    disqualify(
+                        hotkey,
+                        f"copy: identical weights (shard-invariant hash) to king UID {king_uid_for_copy} ({king_model_for_copy})",
+                        state.dq_reasons, commit_block=this_commit_block,
+                    )
+                    disqualified.add(uid)
+                    continue
+            except Exception as e:
+                logger.warning(f"UID {uid}: shard-invariant precheck failed (non-blocking): {e}")
+
         # Integrity check — reset expected hash if miner re-committed or UID recycled
         expected_hash = state.model_hashes.get(str(uid))
         stored_commit_block = state.model_hashes.get(f"{uid}_block")
