@@ -158,10 +158,17 @@ def save_failures(failures: dict[str, int], state_dir: Path = STATE_DIR):
     _save_json(state_dir / "failures.json", failures)
 
 
-def record_failure(uid: int, failures: dict[str, int]) -> int:
-    """Increment and return failure count for a UID."""
+def record_failure(uid: int, failures: dict[str, int], failure_models: dict[str, str] = None,
+                   model_name: str = None) -> int:
+    """Increment and return failure count for a UID.
+    
+    Optionally tracks which model caused the failure so we can reset
+    the counter when a miner updates their commitment to a new model.
+    """
     uid_str = str(uid)
     failures[uid_str] = failures.get(uid_str, 0) + 1
+    if failure_models is not None and model_name:
+        failure_models[uid_str] = model_name
     return failures[uid_str]
 
 

@@ -141,9 +141,16 @@ def precheck_all_models(commitments, uid_to_hotkey, uid_to_coldkey,
             continue
 
         if is_stale(uid, state.failures):
-            logger.debug(f"UID {uid}: stale (too many failures), skipping")
-            disqualified.add(uid)
-            continue
+            # Reset failures if model commitment has changed since failures were recorded
+            last_failed_model = state.failure_models.get(str(uid))
+            if last_failed_model and last_failed_model != model_repo:
+                logger.info(f"UID {uid}: model changed from {last_failed_model} to {model_repo}, resetting failure counter")
+                reset_failures(uid, state.failures)
+                state.failure_models.pop(str(uid), None)
+            else:
+                logger.debug(f"UID {uid}: stale (too many failures), skipping")
+                disqualified.add(uid)
+                continue
 
         # For already-evaluated UIDs, still verify architecture (lightweight config.json check)
         uid_str = str(uid)
@@ -160,7 +167,7 @@ def precheck_all_models(commitments, uid_to_hotkey, uid_to_coldkey,
                 mtype = cfg.get("model_type", "")
                 if mtype != "qwen3_5" or "Qwen3_5ForConditionalGeneration" not in archs:
                     logger.info(f"UID {uid} ({model_repo}): FAIL — wrong architecture ({mtype}/{','.join(archs)})")
-                    record_failure(uid, state.failures)
+                    record_failure(uid, state.failures, state.failure_models, model_repo)
                     disqualify(hotkey, f"arch: Must use Qwen3_5ForConditionalGeneration (found {','.join(archs)}, model_type={mtype}). Fix: edit config.json on HuggingFace.",
                                state.dq_reasons, commit_block=this_commit_block)
                     disqualified.add(uid)
@@ -201,7 +208,7 @@ def precheck_all_models(commitments, uid_to_hotkey, uid_to_coldkey,
             continue
         if not check["pass"]:
             logger.info(f"UID {uid} ({model_repo}): FAIL — {check['reason']}")
-            record_failure(uid, state.failures)
+            record_failure(uid, state.failures, state.failure_models, model_repo)
             disqualify(hotkey, f"arch: {check['reason']}", state.dq_reasons,
                        coldkey=coldkey, hf_username=hf_user, commit_block=this_commit_block)
             disqualified.add(uid)

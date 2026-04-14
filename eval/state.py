@@ -121,6 +121,7 @@ class ValidatorState:
         # Core scoring state
         self.scores: dict[str, float] = {}
         self.failures: dict[str, int] = {}
+        self.failure_models: dict[str, str] = {}  # UID -> model_name at time of failure
         self.dq_reasons: dict[str, str] = {}
         self.evaluated_uids: set[str] = set()
 
@@ -152,6 +153,7 @@ class ValidatorState:
         """Load all state files from disk. Missing files get defaults."""
         self.scores = _load_json(self._path(SCORES_FILE), {})
         self.failures = _load_json(self._path(FAILURES_FILE), {})
+        self.failure_models = _load_json(self._path("failure_models.json"), {})
         self.dq_reasons = _load_json(self._path(DISQUALIFIED_FILE), {})
 
         # evaluated_uids stored as list, loaded as set
@@ -187,6 +189,7 @@ class ValidatorState:
         """Persist all mutable state files to disk atomically."""
         atomic_json_write(self._path(SCORES_FILE), self.scores, indent=2)
         atomic_json_write(self._path(FAILURES_FILE), self.failures, indent=2)
+        atomic_json_write(self._path("failure_models.json"), self.failure_models, indent=2)
         atomic_json_write(self._path(DISQUALIFIED_FILE), self.dq_reasons, indent=2)
         atomic_json_write(self._path(EVALUATED_UIDS_FILE), list(self.evaluated_uids))
         atomic_json_write(self._path(UID_HOTKEY_MAP_FILE), self.uid_hotkey_map)
