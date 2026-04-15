@@ -36,7 +36,13 @@ logger = logging.getLogger("distillation.remote_validator")
 logger.setLevel(logging.DEBUG)
 
 from eval.state import ValidatorState, atomic_json_write, log_event
-from eval.chain import fetch_metagraph, parse_commitments, set_weights
+from eval.chain import (
+    build_winner_take_all_weights,
+    fetch_metagraph,
+    get_validator_weight_target,
+    parse_commitments,
+    set_weights,
+)
 from eval.scoring import (
     load_scores, save_scores,
     load_failures, save_failures, record_failure, reset_failures, is_stale,
@@ -62,6 +68,7 @@ from scripts.validator.state_manager import (
     update_top4_leaderboard,
 )
 from scripts.validator.announcements import announce_new_king
+from scripts.validator.service import run_validator as _run_validator
 
 
 # ── Main Loop ─────────────────────────────────────────────────────────────
@@ -83,6 +90,20 @@ from scripts.validator.announcements import announce_new_king
 def main(network, netuid, wallet_name, hotkey_name, wallet_path,
          lium_api_key, lium_pod_name, state_dir, max_params_b, tempo, once, use_vllm):
     """Run the distillation validator with king-of-the-hill evaluation."""
+    return _run_validator(
+        network,
+        netuid,
+        wallet_name,
+        hotkey_name,
+        wallet_path,
+        lium_api_key,
+        lium_pod_name,
+        state_dir,
+        max_params_b,
+        tempo,
+        once,
+        use_vllm,
+    )
     import bittensor as bt
     from lium import Lium, Config
 
@@ -147,6 +168,22 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                     logger.warning(f"STALE ROUND: active for {age_min:.0f}m — clearing")
                     state.save_progress({"active": False, "stale_cleared": True, "stale_age_min": round(age_min, 1)})
                     state.clear_round()
+                    state.current_round = {}
+
+            # ── Clear orphaned round state left behind by failed evals ──
+            if state.current_round and not state.eval_progress.get("active"):
+                round_age_min = None
+                if state.current_round.get("started_at"):
+                    round_age_min = (time.time() - state.current_round["started_at"]) / 60
+                logger.warning("ORPHANED ROUND: current_round exists without active eval progress — clearing")
+                log_event(
+                    f"Cleared orphaned round state with no active eval progress"
+                    + (f" ({round_age_min:.1f}m old)" if round_age_min is not None else ""),
+                    level="warning",
+                    state_dir=state_dir,
+                )
+                state.clear_round()
+                state.current_round = {}
 
             # ── Fetch chain state ──
             print("[validator] Fetching chain state...", flush=True)
@@ -225,6 +262,10 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 if king_uid is not None:
                     logger.info(f"King from scores fallback: UID {king_uid} (KL={king_kl:.6f})")
 
+            validator_uid = next(
+                (uid for uid, hotkey in uid_to_hotkey.items() if hotkey == wallet.hotkey.ss58_address),
+                None,
+            )
             challengers = select_challengers(valid_models, state, king_uid, king_kl, epoch_count)
             challengers_before_top5 = set(challengers.keys())
             log_event(f"select_challengers returned {len(challengers)} (P1/P3), king={king_uid}", state_dir=state_dir)
@@ -237,8 +278,7 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 log_event(f"No challengers at all (before_top5={len(challengers_before_top5)}, after_all={len(challengers)})", state_dir=state_dir)
                 logger.info(f"No challengers, king UID {king_uid} (KL={king_kl:.6f}) holds")
                 if king_uid is not None:
-                    weights = [0.0] * max(n_uids, king_uid + 1)
-                    weights[king_uid] = 1.0
+                    weights = build_winner_take_all_weights(n_uids, king_uid)
                     set_weights(subtensor, wallet, netuid, n_uids, weights, king_uid)
                 state.save()
                 if once:
@@ -250,6 +290,28 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
             if top5_only:
                 log_event(f"Top-5 only round: {len(challengers)} contender(s), no new P1/P3", state_dir=state_dir)
                 logger.info(f"Running top-5-only round with {len(challengers)} contender(s)")
+
+            # Keep on-chain weights aligned with the current king before GPU work starts.
+            # If prompt sampling or pod eval fails mid-round, validators should still point
+            # at the reigning king instead of an older stale winner.
+            if king_uid is not None and validator_uid is not None:
+                try:
+                    current_weight_target = get_validator_weight_target(subtensor, netuid, validator_uid)
+                except Exception as weight_err:
+                    current_weight_target = None
+                    logger.warning(f"Could not read current validator weights: {weight_err}")
+
+                if current_weight_target != king_uid:
+                    logger.warning(
+                        f"Validator weights stale before eval: chain UID {current_weight_target} != king UID {king_uid}; syncing"
+                    )
+                    log_event(
+                        f"Syncing stale weights before eval: chain UID {current_weight_target} -> king UID {king_uid}",
+                        level="warning",
+                        state_dir=state_dir,
+                    )
+                    weights = build_winner_take_all_weights(n_uids, king_uid)
+                    set_weights(subtensor, wallet, netuid, n_uids, weights, king_uid)
 
             # ── Phase 3: GPU evaluation ──
             models_to_eval = {}
@@ -313,6 +375,19 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
                 eval_script, eval_script_remote,
             )
             if results is None:
+                logger.warning("Eval did not produce usable results — clearing round state")
+                log_event(
+                    "Eval failed to produce usable results; cleared round state and will retry next epoch",
+                    level="warning",
+                    state_dir=state_dir,
+                )
+                state.clear_round()
+                state.save_progress({"active": False, "failed": True, "failed_at": time.time()})
+                try:
+                    pod.post_eval_cleanup(TEACHER_MODEL)
+                    pod.resume_background_tasks()
+                except Exception as cleanup_err:
+                    logger.warning(f"Pod cleanup after failed eval: {cleanup_err}")
                 if once:
                     break
                 time.sleep(tempo)
@@ -364,8 +439,7 @@ def main(network, netuid, wallet_name, hotkey_name, wallet_path,
 
             # Set weights
             if winner_uid is not None:
-                weights = [0.0] * max(n_uids, winner_uid + 1)
-                weights[winner_uid] = 1.0
+                weights = build_winner_take_all_weights(n_uids, winner_uid)
                 set_weights(subtensor, wallet, netuid, n_uids, weights, winner_uid)
             else:
                 logger.info("No valid miners — skipping weight setting")

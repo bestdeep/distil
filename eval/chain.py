@@ -84,6 +84,33 @@ def parse_commitments(metagraph, revealed: dict, n_uids: int) -> tuple[dict, dic
     return commitments, uid_to_hotkey, uid_to_coldkey
 
 
+def build_winner_take_all_weights(n_uids: int, winner_uid: int) -> list[float]:
+    """Build a one-hot weight vector for the winning UID."""
+    weights = [0.0] * max(n_uids, winner_uid + 1)
+    weights[winner_uid] = 1.0
+    return weights
+
+
+def get_validator_weight_target(subtensor, netuid: int, validator_uid: int) -> int | None:
+    """Return the validator's current highest-weight target UID, if any."""
+
+    def _fetch():
+        rows = subtensor.weights(netuid)
+        for row_uid, pairs in rows:
+            if int(row_uid) != validator_uid:
+                continue
+            if not pairs:
+                return None
+            best_uid, _ = max(
+                ((int(uid), int(weight)) for uid, weight in pairs),
+                key=lambda item: item[1],
+            )
+            return best_uid
+        return None
+
+    return _retry_chain(_fetch, label="fetch_validator_weights")
+
+
 def set_weights(subtensor, wallet, netuid: int, n_uids: int,
                 weights: list[float], winner_uid: int, max_attempts: int = 3):
     """Set weights on-chain with retry.

@@ -11,10 +11,9 @@ import {
 } from "@/lib/api";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { DashboardTabs } from "@/components/dashboard-tabs";
+import { SCORE_TO_BEAT_FACTOR } from "@/lib/subnet";
 
 export const dynamic = "force-dynamic";
-
-const EPSILON = 0.01;
 
 export default async function HomePage() {
   const [metagraph, commitments, scores, price, history, evalProgress, h2hLatest] = await Promise.all([
@@ -39,7 +38,7 @@ export default async function HomePage() {
 
   const king = miners.find((m) => m.isWinner);
   const kingH2hKl = h2hLatest?.king_h2h_kl ?? king?.klScore ?? null;
-  const scoreToBeat = kingH2hKl != null ? kingH2hKl * (1 - EPSILON) : null;
+  const scoreToBeat = kingH2hKl != null ? kingH2hKl * SCORE_TO_BEAT_FACTOR : null;
   const lastEvalTime = scores?.last_eval_time ?? 0;
   const tempoSeconds = scores?.tempo_seconds ?? 600;
   const pendingMiners = miners.filter((m) => m.klScore == null && !m.isDisqualified);

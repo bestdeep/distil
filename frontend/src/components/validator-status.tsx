@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://api.arbos.life";
+import { CLIENT_API_BASE } from "@/lib/subnet";
 
 interface HealthData {
   king_uid: number | null;
@@ -44,6 +43,15 @@ const PHASE_LABELS: Record<string, string> = {
   scoring: "Scoring student",
 };
 
+const TEACHER_PROGRESS_PHASES = new Set([
+  "teacher_loading",
+  "teacher_generation",
+  "teacher_logits",
+  "vllm_starting",
+  "vllm_generating",
+  "gpu_precompute",
+]);
+
 function formatFixed(value: number | null | undefined, digits: number, fallback = "—"): string {
   return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : fallback;
 }
@@ -63,7 +71,7 @@ export function ValidatorStatus({
 
   const fetchHealth = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/health`, { cache: "no-store" });
+      const res = await fetch(`${CLIENT_API_BASE}/api/health`, { cache: "no-store" });
       if (res.ok) setHealth(await res.json());
     } catch {}
   }, []);
@@ -77,6 +85,10 @@ export function ValidatorStatus({
   const isActive = health?.eval_active === true;
   const progress = health?.eval_progress;
   const phase = progress?.phase;
+  const showTeacherPromptProgress =
+    TEACHER_PROGRESS_PHASES.has(phase ?? "") &&
+    progress?.teacher_prompts_done != null &&
+    progress?.prompts_total != null;
 
   const codeRev = health?.code_revision;
 
@@ -143,7 +155,7 @@ export function ValidatorStatus({
                 {progress.current_prompt}/{progress.prompts_total} prompts
               </span>
             )}
-            {phase === "teacher_logits" && progress.teacher_prompts_done != null && progress.prompts_total != null && (
+            {showTeacherPromptProgress && (
               <span className="tabular-nums">
                 {progress.teacher_prompts_done}/{progress.prompts_total} prompts
               </span>

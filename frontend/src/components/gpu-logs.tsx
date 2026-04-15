@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useMemo } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://api.arbos.life";
+import { CLIENT_API_BASE } from "@/lib/subnet";
 
 interface GpuLogsData {
   lines: string[];
@@ -21,7 +20,7 @@ export function GpuLogs() {
 
     async function poll() {
       try {
-        const res = await fetch(`${API_BASE}/api/gpu-logs?lines=80`, {
+        const res = await fetch(`${CLIENT_API_BASE}/api/gpu-logs?lines=80`, {
           cache: "no-store",
         });
         if (!res.ok) return;

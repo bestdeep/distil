@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://api.arbos.life";
+import { CLIENT_API_BASE } from "@/lib/subnet";
 
 interface CompletedStudent {
   student_idx: number;
@@ -96,7 +95,7 @@ export function EvalProgressBar() {
     let cancelled = false;
     async function poll() {
       try {
-        const res = await fetch(`${API_BASE}/api/eval-progress`, { cache: "no-store" });
+        const res = await fetch(`${CLIENT_API_BASE}/api/eval-progress`, { cache: "no-store" });
         if (res.ok) {
           const data: EvalProgress = await res.json();
           if (!cancelled) setProgress(data);

@@ -29,3 +29,13 @@ state/prompt_cache/
 knowledge/
 results/
 state/
+frontend/.next/
+.openclaw/
+.trash/
+*.bak
+*.bak.*
+node_modules/
+memory/
+HEARTBEAT.md
+SESSION_MEMORY.md
+REWRITE_PLAN.md

@@ -1,8 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://api.arbos.life";
+import { CLIENT_API_BASE } from "@/lib/subnet";
 
 interface Message {
   role: "user" | "assistant";
@@ -64,7 +63,7 @@ export function ChatTab() {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 8000);
-      const res = await fetch(`${API_BASE}/api/chat/status`, {
+      const res = await fetch(`${CLIENT_API_BASE}/api/chat/status`, {
         cache: "no-store",
         signal: controller.signal,
       });
@@ -113,7 +112,7 @@ export function ChatTab() {
     abortRef.current = controller;
 
     try {
-      const res = await fetch(`${API_BASE}/api/chat`, {
+      const res = await fetch(`${CLIENT_API_BASE}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

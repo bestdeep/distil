@@ -1,4 +1,4 @@
-import { TEACHER } from "@/lib/api";
+import { API_SETTINGS, TEACHER } from "@/lib/subnet";
 
 export function Footer() {
   return (
@@ -15,7 +15,7 @@ export function Footer() {
           <a href={`https://huggingface.co/${TEACHER.model}`} target="_blank" rel="noopener noreferrer" className="hover:text-foreground/70 transition-colors">
             Teacher ↗
           </a>
-          <a href="https://api.arbos.life/docs" target="_blank" rel="noopener noreferrer" className="hover:text-foreground/70 transition-colors">
+          <a href={`${API_SETTINGS.publicUrl}/docs`} target="_blank" rel="noopener noreferrer" className="hover:text-foreground/70 transition-colors">
             API Docs ↗
           </a>
           <a href="https://taomarketcap.com/subnets/97" target="_blank" rel="noopener noreferrer" className="hover:text-foreground/70 transition-colors">

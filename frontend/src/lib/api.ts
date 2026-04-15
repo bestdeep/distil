@@ -1,24 +1,22 @@
 import type { Teacher, SubnetConfig } from "./types";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL || "https://api.arbos.life";
+import { API_BASE, NETUID, TEACHER as TEACHER_CONFIG, VALIDATOR } from "./subnet";
 
 export const TEACHER: Teacher = {
-  model: "Qwen/Qwen3.5-35B-A3B",
-  totalParams: 35_000_000_000,
-  activeParams: 3_000_000_000,
-  vocabSize: 248_044,
-  architecture: "qwen3_5_moe",
-  maxStudentParams: 3_500_000_000,
+  model: TEACHER_CONFIG.model,
+  totalParams: TEACHER_CONFIG.totalParams,
+  activeParams: TEACHER_CONFIG.activeParams,
+  vocabSize: TEACHER_CONFIG.vocabSize,
+  architecture: TEACHER_CONFIG.architecture,
+  maxStudentParams: TEACHER_CONFIG.maxStudentParams,
 };
 
 export const SUBNET_CONFIG: SubnetConfig = {
-  netuid: null,
-  maxKlThreshold: 2.0,
+  netuid: NETUID,
+  maxKlThreshold: VALIDATOR.maxKlThreshold,
   emaAlpha: 0.3,
-  maxNewTokens: 512,
-  maxPromptTokens: 1024,
-  samplesPerEpoch: 12,
+  maxNewTokens: VALIDATOR.maxNewTokens,
+  maxPromptTokens: VALIDATOR.maxPromptTokens,
+  samplesPerEpoch: VALIDATOR.evalPromptsFull,
 };
 
 export interface NeuronData {
@@ -176,10 +174,14 @@ export interface ScoreHistoryEntry {
   king_uid: number | null;
 }
 
+export interface ScoreHistoryResponse {
+  entries: ScoreHistoryEntry[];
+  full_eval_block: number | null;
+}
+
 export async function fetchHistory(limit = 50): Promise<ScoreHistoryEntry[]> {
-  const data = await safeFetch<ScoreHistoryEntry[]>(`${API_BASE}/api/history?limit=${limit}`);
-  // If the API doesn't support ?limit, truncate client-side
-  const entries = data ?? [];
+  const data = await safeFetch<ScoreHistoryEntry[] | ScoreHistoryResponse>(`${API_BASE}/api/history?limit=${limit}`);
+  const entries = Array.isArray(data) ? data : data?.entries ?? [];
   return entries.length > limit ? entries.slice(-limit) : entries;
 }
 
@@ -314,6 +316,7 @@ export function buildMinerList(
   kingUid?: number | null,
 ): MinerEntry[] {
   if (!metagraph || !commitments) return [];
+  const maxKl = VALIDATOR.maxKlThreshold;
 
   // Map hotkey → commitment
   const hotkeyCom = commitments.commitments;
@@ -337,7 +340,7 @@ export function buildMinerList(
     // Use ema_scores as authoritative — includes disqualifications (duplicates, integrity failures)
     // Fall back to last_eval model KL only if no ema_score exists
     const rawKl = modelKl[com.model] ?? null;
-    const kl = ema != null && ema > 2.0 ? null : (ema ?? rawKl);
+    const kl = ema != null && ema > maxKl ? null : (ema ?? rawKl);
 
     // Compute confidence interval from per-prompt data
     const studentData = scores?.last_eval?.students?.[com.model];
@@ -361,7 +364,7 @@ export function buildMinerList(
       ?? scores?.disqualified?.[String(uid)]
       ?? scores?.disqualified?.[neuron.hotkey]
       ?? null;
-    const isDisqualified = dqReason != null || (ema != null && ema > 2.0);
+    const isDisqualified = dqReason != null || (ema != null && ema > maxKl);
 
     miners.push({
       uid,

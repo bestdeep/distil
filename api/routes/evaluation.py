@@ -10,6 +10,22 @@ from fastapi.responses import JSONResponse
 from config import STATE_DIR
 from helpers.cache import _get_stale
 from helpers.sanitize import _sanitize_floats, _safe_json_load
+from state_store import (
+    benchmarks,
+    eval_data_file,
+    eval_progress,
+    h2h_history,
+    h2h_latest,
+    h2h_tested_against_king,
+    normalize_eval_progress,
+    read_json_file,
+    read_state,
+    score_history,
+    scores,
+    top4_leaderboard,
+    uid_hotkey_map,
+    write_json_file,
+)
 
 router = APIRouter()
 
@@ -17,13 +33,13 @@ router = APIRouter()
 @router.get("/api/leaderboard", tags=["Evaluation"], summary="Top-4 leaderboard",
          description="Returns the top-4 leaderboard - current king and contenders. Dethronement uses paired t-test (p < 0.05).")
 def get_leaderboard():
-    top4 = _safe_json_load(os.path.join(STATE_DIR, "top4_leaderboard.json"), {}) or {}
-    scores = _safe_json_load(os.path.join(STATE_DIR, "scores.json"), {})
-    h2h_latest = _safe_json_load(os.path.join(STATE_DIR, "h2h_latest.json"), {})
-    uid_map = _safe_json_load(os.path.join(STATE_DIR, "uid_hotkey_map.json"), {})
+    top4 = top4_leaderboard() or {}
+    scores_data = scores()
+    latest = h2h_latest()
+    uid_map = uid_hotkey_map()
     commitments_data = _get_stale("commitments") or {}
     commitments = commitments_data.get("commitments", {})
-    cumulative = _safe_json_load(os.path.join(STATE_DIR, "cumulative_scores.json"), {})
+    cumulative = read_state("cumulative_scores.json", {})
 
     def _enrich(entry):
         """Fill in model name and KL from live state if missing."""
@@ -50,9 +66,9 @@ def get_leaderboard():
 
     king_data = dict(top4.get("king") or {}) if top4.get("king") else None
     # Override king from h2h_latest if top4 is stale
-    if h2h_latest.get("king_uid") is not None:
-        if not king_data or king_data.get("uid") != h2h_latest["king_uid"]:
-            king_data = {"uid": h2h_latest["king_uid"], "kl": h2h_latest.get("king_kl")}
+    if latest.get("king_uid") is not None:
+        if not king_data or king_data.get("uid") != latest["king_uid"]:
+            king_data = {"uid": latest["king_uid"], "kl": latest.get("king_kl")}
     king_data = _enrich(king_data)
 
     contenders = [_enrich(dict(c)) for c in (top4.get("contenders") or [])]
@@ -61,7 +77,7 @@ def get_leaderboard():
     contenders = [c for c in contenders if c.get("uid") not in (-1, king_uid)]
     # If contenders are empty or stale, rebuild from scores
     if not contenders or not any(c.get("h2h_kl") for c in contenders):
-        scored = [(int(uid), kl) for uid, kl in scores.items()
+        scored = [(int(uid), kl) for uid, kl in scores_data.items()
                   if int(uid) not in (-1, king_uid or -999) and kl is not None]
         scored.sort(key=lambda x: x[1])
         contenders = [_enrich({"uid": uid, "h2h_kl": kl}) for uid, kl in scored[:4]]
@@ -76,7 +92,7 @@ def get_leaderboard():
 
     # Reference model baseline (Qwen3.5-4B, UID -1)
     ref_kl = None
-    for r in h2h_latest.get("results", []):
+    for r in latest.get("results", []):
         if r.get("uid") == -1:
             ref_kl = r.get("kl")
             break
@@ -192,14 +208,7 @@ When `active: true`, the response includes:
 When `active: false`, the validator is idle between rounds.
 """)
 def get_eval_progress():
-    progress_path = os.path.join(STATE_DIR, "eval_progress.json")
-    if os.path.exists(progress_path):
-        try:
-            with open(progress_path) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"active": False}
+    return normalize_eval_progress(eval_progress())
 
 
 @router.get("/api/h2h-latest", tags=["Evaluation"], summary="Latest head-to-head round",
@@ -401,16 +410,16 @@ def get_eval_stats():
          description="""Returns why each miner is or isn't being evaluated.
 Statuses: king, queued, tested, stale, untested, disqualified.""")
 def get_eval_status():
-    scores = _safe_json_load(os.path.join(STATE_DIR, "scores.json"), {})
-    dq = _safe_json_load(os.path.join(STATE_DIR, "disqualified.json"), {})
-    h2h_tracker = _safe_json_load(os.path.join(STATE_DIR, "h2h_tested_against_king.json"), {})
-    h2h_latest = _safe_json_load(os.path.join(STATE_DIR, "h2h_latest.json"), {})
-    current_king_uid = h2h_latest.get("king_uid")
-    current_block = h2h_latest.get("block", 0)
+    scores_data = scores()
+    dq = read_state("disqualified.json", {})
+    h2h_tracker = h2h_tested_against_king()
+    latest = h2h_latest()
+    current_king_uid = latest.get("king_uid")
+    current_block = latest.get("block", 0)
     stale_threshold = 50
 
     result = {}
-    for uid_str in scores:
+    for uid_str in scores_data:
         if uid_str in dq:
             result[uid_str] = {"status": "disqualified"}
             continue
@@ -437,40 +446,22 @@ def get_eval_status():
          description="Returns historical KL scores for all miners over time. Supports `?limit=N` (default 50) to return only the latest N entries. Response includes `full_eval_block` if a full eval round exists.")
 def get_history(limit: int = 50):
     limit = max(1, min(limit, 500))
-    history_path = os.path.join(STATE_DIR, "score_history.json")
-    entries = []
-    if os.path.exists(history_path):
-        try:
-            with open(history_path) as f:
-                data = json.load(f)
-            entries = data[-limit:] if len(data) > limit else data
-        except Exception:
-            pass
+    history_entries = score_history()
+    entries = history_entries[-limit:] if len(history_entries) > limit else history_entries
 
-    # Find full_eval block from h2h_history.
     full_eval_block = None
-    h2h_path = os.path.join(STATE_DIR, "h2h_history.json")
-    if os.path.exists(h2h_path):
-        try:
-            with open(h2h_path) as f:
-                h2h_data = json.load(f)
-            full_eval_round = next((r for r in reversed(h2h_data) if r.get("type") == "full_eval"), None)
-            if full_eval_round:
-                raw_block = full_eval_round.get("block")
-                full_eval_ts = full_eval_round.get("timestamp")
-                if isinstance(raw_block, int) and raw_block < 100_000_000:
-                    full_eval_block = raw_block
-                elif full_eval_ts and entries:
-                    nearest = min(entries, key=lambda e: abs((e.get("timestamp") or 0) - full_eval_ts))
-                    full_eval_block = nearest.get("block")
-                elif full_eval_ts and os.path.exists(history_path):
-                    with open(history_path) as f:
-                        all_history = json.load(f)
-                    if all_history:
-                        nearest = min(all_history, key=lambda e: abs((e.get("timestamp") or 0) - full_eval_ts))
-                        full_eval_block = nearest.get("block")
-        except Exception:
-            pass
+    full_eval_round = next((r for r in reversed(h2h_history()) if r.get("type") == "full_eval"), None)
+    if full_eval_round:
+        raw_block = full_eval_round.get("block")
+        full_eval_ts = full_eval_round.get("timestamp")
+        if isinstance(raw_block, int) and raw_block < 100_000_000:
+            full_eval_block = raw_block
+        elif full_eval_ts and entries:
+            nearest = min(entries, key=lambda e: abs((e.get("timestamp") or 0) - full_eval_ts))
+            full_eval_block = nearest.get("block")
+        elif full_eval_ts and history_entries:
+            nearest = min(history_entries, key=lambda e: abs((e.get("timestamp") or 0) - full_eval_ts))
+            full_eval_block = nearest.get("block")
 
     return JSONResponse(
         content={"entries": entries, "full_eval_block": full_eval_block},
@@ -482,24 +473,18 @@ def get_history(limit: int = 50):
          description="Returns eval round data. Use `?list=true` for available files, or `?file=<name>` for a specific round.")
 def get_eval_data(list: bool = False, file: str = None):
     data_dir = os.path.join(STATE_DIR, "eval_data")
-    latest = os.path.join(STATE_DIR, "eval_data_latest.json")
     if list:
         if not os.path.exists(data_dir):
             return {"files": []}
         files = sorted([f for f in os.listdir(data_dir) if f.endswith(".json")], reverse=True)
         return {"files": files, "count": len(files)}
-    if file:
-        safe_name = os.path.basename(file)
-        path = os.path.join(data_dir, safe_name)
-        if not os.path.exists(path):
-            return JSONResponse(content={"error": "File not found"}, status_code=404)
-    else:
-        path = latest
+    path = eval_data_file(file)
+    if file and not os.path.exists(path):
+        return JSONResponse(content={"error": "File not found"}, status_code=404)
     if not os.path.exists(path):
         return JSONResponse(content={"error": "No eval data available"}, status_code=404)
     try:
-        with open(path) as f:
-            return JSONResponse(content=json.load(f), headers={"Cache-Control": "public, max-age=60"})
+        return JSONResponse(content=read_json_file(path, {}), headers={"Cache-Control": "public, max-age=60"})
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
@@ -507,23 +492,7 @@ def get_eval_data(list: bool = False, file: str = None):
 @router.get("/api/benchmarks", tags=["Evaluation"], summary="Benchmark results for king models",
          description="Returns benchmark scores for evaluated king models. Scores are from lm-eval-harness full eval sets.")
 def get_benchmarks():
-    benchmarks_dir = os.path.join(STATE_DIR, "benchmarks")
-    if not os.path.exists(benchmarks_dir):
-        return JSONResponse(content={"models": [], "baseline": None}, headers={"Cache-Control": "public, max-age=60"})
-    models = []
-    baseline = None
-    for fname in sorted(os.listdir(benchmarks_dir)):
-        if not fname.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(benchmarks_dir, fname)) as f:
-                data = json.load(f)
-            if data.get("is_baseline"):
-                baseline = data
-            else:
-                models.append(data)
-        except Exception:
-            pass
+    models, baseline = benchmarks()
     return JSONResponse(
         content=_sanitize_floats({"models": models, "baseline": baseline}),
         headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=120"},

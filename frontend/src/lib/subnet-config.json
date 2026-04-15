@@ -1,0 +1,42 @@
+{
+  "netuid": 97,
+  "teacher": {
+    "model": "Qwen/Qwen3.5-35B-A3B",
+    "architecture": "qwen3_5_moe",
+    "totalParams": 35000000000,
+    "activeParams": 3000000000,
+    "vocabSize": 248044,
+    "configVocabSize": 248320,
+    "maxStudentParams": 5250000000
+  },
+  "validator": {
+    "maxKlThreshold": 2.0,
+    "maxNewTokens": 8192,
+    "maxPromptTokens": 1024,
+    "evalPromptsFull": 60,
+    "evalPromptsH2h": 300,
+    "vllmConcurrency": 8,
+    "epsilon": 0.01,
+    "pairedTestAlpha": 0.03,
+    "staleH2hEpochs": 50,
+    "topNAlwaysInclude": 5,
+    "referenceModel": "Qwen/Qwen3.5-4B",
+    "referenceUid": -1,
+    "activationCopyThreshold": 0.9999,
+    "distilRoleId": "1482026585358991571"
+  },
+  "chat": {
+    "appPort": 8100
+  },
+  "api": {
+    "cacheTtl": 60,
+    "publicUrl": "https://api.arbos.life",
+    "dashboardUrl": "https://distil.arbos.life",
+    "allowedOrigins": [
+      "https://distil.arbos.life",
+      "http://localhost:3000",
+      "http://localhost:5173"
+    ],
+    "tmcBase": "https://api.taomarketcap.com"
+  }
+}

@@ -3,8 +3,8 @@
 import { useState } from "react";
 import Link from "next/link";
 import type { MinerEntry, ModelInfo, ScoresResponse } from "@/lib/api";
-import { TEACHER } from "@/lib/api";
 import { formatParams } from "@/lib/utils";
+import { TEACHER } from "@/lib/subnet";
 import { Badge } from "@/components/ui/badge";
 import { CopyableHotkey } from "@/components/copyable-hotkey";
 
@@ -154,7 +154,7 @@ export function MinersTab({
             <div className="mt-3 space-y-2">
               <p className="text-sm text-muted-foreground max-w-lg mx-auto">
                 Distill <span className="font-mono text-blue-400">{TEACHER.model}</span> into
-                ≤{formatParams(5_250_000_000)} params and earn emissions.
+                ≤{formatParams(TEACHER.maxStudentParams)} params and earn emissions.
               </p>
               <Link
                 href="/about"

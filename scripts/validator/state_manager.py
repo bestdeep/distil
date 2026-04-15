@@ -13,9 +13,6 @@ from eval.scoring import (
 from scripts.validator.config import (
     MAX_KL_THRESHOLD, EPSILON, PAIRED_TEST_ALPHA, TOP_N_ALWAYS_INCLUDE,
 )
-from scripts.validator.chat_pod import (
-    restart_chat_server, trigger_benchmarks, ensure_chat_server_running,
-)
 
 logger = logging.getLogger("distillation.remote_validator")
 
@@ -144,15 +141,6 @@ def update_h2h_state(state: ValidatorState, h2h_results, king_uid, winner_uid,
     state.h2h_history.append(h2h_round)
     state.h2h_history = state.h2h_history[-50:]
     state.save_h2h()
-
-    # Auto-restart chat server with new king model
-    if king_changed and effective_king_model:
-        restart_chat_server(effective_king_model)
-        # Auto-trigger benchmarks for new king
-        trigger_benchmarks(effective_king_model, effective_king_uid)
-    elif not king_changed:
-        # Even if king didn't change, ensure chat server is running with correct model
-        ensure_chat_server_running(effective_king_model)
 
     # Update tested-against-king tracker
     if king_uid is not None:

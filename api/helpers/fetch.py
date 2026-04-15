@@ -1,12 +1,19 @@
 """Data fetchers for metagraph, commitments, and price."""
 
 import json
+import os
+import sys
 import time
 
 import requests as req
 
 from config import NETUID, TMC_BASE, TMC_HEADERS
 from helpers.cache import _get_stale
+
+
+def _subprocess_python() -> str:
+    """Use the API/validator interpreter instead of the host system Python."""
+    return os.environ.get("DISTIL_PYTHON") or sys.executable or "python3"
 
 
 def _fetch_metagraph():
@@ -34,7 +41,7 @@ for uid in range(meta.n):
 print(json.dumps({"netuid": 97, "block": int(block), "n": int(meta.n), "neurons": neurons}))
 """
     result = subprocess.run(
-        ["python3", "-c", script],
+        [_subprocess_python(), "-c", script],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
@@ -95,7 +102,7 @@ for hotkey, entries in revealed.items():
 print(json.dumps({"commitments": commits, "count": len(commits)}))
 """
     result = subprocess.run(
-        ["python3", "-c", script],
+        [_subprocess_python(), "-c", script],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:

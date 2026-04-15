@@ -2,8 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRefreshKey } from "@/components/auto-refresh";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://api.arbos.life";
+import { CLIENT_API_BASE } from "@/lib/subnet";
 
 interface KingChange {
   block: number;
@@ -64,7 +63,7 @@ export function KingHistory() {
 
     async function fetchKingHistory() {
       try {
-        const res = await fetch(`${API_BASE}/api/king-history`, { cache: "no-store" });
+        const res = await fetch(`${CLIENT_API_BASE}/api/king-history`, { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
           if (!cancelled) {
@@ -83,7 +82,7 @@ export function KingHistory() {
 
     async function fallbackFromH2h() {
       try {
-        const res = await fetch(`${API_BASE}/api/h2h-history`, { cache: "no-store" });
+        const res = await fetch(`${CLIENT_API_BASE}/api/h2h-history`, { cache: "no-store" });
         if (!res.ok) return;
         const raw = await res.json();
         const rounds = Array.isArray(raw) ? raw : Array.isArray(raw?.rounds) ? raw.rounds : [];

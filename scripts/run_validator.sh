@@ -23,11 +23,6 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 export HF_TOKEN="${HF_TOKEN:-$(cat "$HOME/.cache/huggingface/token" 2>/dev/null || echo '')}"
-export HF_HOME="${HF_HOME:-$HOME/.cache/validator-hf}"
-export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
-export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$HF_HOME/datasets}"
-export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HUB_CACHE}"
-mkdir -p "$HF_HUB_CACHE" "$HF_DATASETS_CACHE"
 
 exec "$PYTHON_BIN" scripts/remote_validator.py \
   --wallet-name "${DISTIL_WALLET_NAME:-affine}" \

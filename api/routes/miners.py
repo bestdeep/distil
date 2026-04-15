@@ -7,10 +7,20 @@ import traceback
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import STATE_DIR, CACHE_TTL
-from helpers.cache import _get_cached, _get_stale, _set_cached, _bg_refresh
-from helpers.fetch import _fetch_commitments
+from config import STATE_DIR
+from external import get_commitments as fetch_commitments_data, get_model_info as fetch_model_info_data
+from helpers.cache import _get_stale
 from helpers.sanitize import _sanitize_floats, _safe_json_load
+from state_store import (
+    disqualified,
+    h2h_latest,
+    h2h_tested_against_king,
+    last_eval,
+    read_state,
+    scores as load_scores,
+    top4_leaderboard,
+    uid_hotkey_map,
+)
 
 router = APIRouter()
 
@@ -26,19 +36,7 @@ Each commitment contains:
 **Cached for 60s.**
 """)
 def get_commitments():
-    cached = _get_cached("commitments", CACHE_TTL)
-    if cached:
-        return cached
-    stale = _get_stale("commitments")
-    if stale:
-        _bg_refresh("commitments", _fetch_commitments)
-        return stale
-    try:
-        result = _fetch_commitments()
-        _set_cached("commitments", result)
-        return result
-    except Exception as e:
-        return {"commitments": {}, "count": 0, "error": str(e)}
+    return fetch_commitments_data()
 
 
 @router.get("/api/scores", tags=["Miners"], summary="Current KL scores and disqualifications",
@@ -55,21 +53,20 @@ Response includes:
 def get_scores(fields: str = ""):
     result = {"scores": {}, "ema_scores": {}, "disqualified": {}, "last_eval": None, "last_eval_time": None, "tempo_seconds": 600}
     scores_path = os.path.join(STATE_DIR, "scores.json")
-    s = _safe_json_load(scores_path, {})
+    s = load_scores()
     result["scores"] = s
     result["ema_scores"] = s  # backward compat
-    dq_path = os.path.join(STATE_DIR, "disqualified.json")
-    result["disqualified"] = _safe_json_load(dq_path, {})
+    result["disqualified"] = disqualified()
     eval_path = os.path.join(STATE_DIR, "last_eval.json")
-    last_eval = _safe_json_load(eval_path)
-    if last_eval is not None:
-        result["last_eval"] = last_eval
+    last_eval_data = last_eval()
+    if last_eval_data is not None:
+        result["last_eval"] = last_eval_data
         try:
             result["last_eval_time"] = os.path.getmtime(eval_path)
         except OSError:
-            result["last_eval_time"] = last_eval.get("timestamp")
-        result["last_eval_block"] = last_eval.get("block")
-        result["last_eval_type"] = last_eval.get("type")
+            result["last_eval_time"] = last_eval_data.get("timestamp")
+        result["last_eval_block"] = last_eval_data.get("block")
+        result["last_eval_type"] = last_eval_data.get("type")
     # Filter fields if requested
     if fields:
         requested = set(f.strip() for f in fields.split(","))
@@ -96,75 +93,7 @@ Response includes:
 **Cached for 1 hour.**
 """)
 def get_model_info(model_path: str):
-    cache_key = f"model_info:{model_path}"
-    cached = _get_cached(cache_key, 3600)
-    if cached:
-        return cached
-    try:
-        import subprocess
-        script = """
-import json, os, sys
-from huggingface_hub import model_info as hf_model_info, hf_hub_download
-
-model_path = os.environ["MODEL_PATH"]
-
-info = hf_model_info(model_path, files_metadata=True)
-
-params_b = None
-if info.safetensors and hasattr(info.safetensors, "total"):
-    params_b = round(info.safetensors.total / 1e9, 2)
-
-active_params_b = None
-is_moe = False
-num_experts = None
-num_active_experts = None
-try:
-    config_path = hf_hub_download(repo_id=model_path, filename="config.json")
-    with open(config_path) as f:
-        config = json.load(f)
-    ne = config.get("num_local_experts", config.get("num_experts", 1))
-    is_moe = ne > 1
-    if is_moe:
-        hidden = config.get("hidden_size", 0)
-        num_experts = ne
-        num_active_experts = config.get("num_experts_per_tok", config.get("num_active_experts", ne))
-except Exception:
-    pass
-
-card = info.card_data
-result = {
-    "model": model_path,
-    "author": info.author or model_path.split("/")[0],
-    "tags": list(info.tags) if info.tags else [],
-    "downloads": info.downloads,
-    "likes": info.likes,
-    "created_at": info.created_at.isoformat() if info.created_at else None,
-    "last_modified": info.last_modified.isoformat() if info.last_modified else None,
-    "params_b": params_b,
-    "active_params_b": active_params_b,
-    "is_moe": is_moe,
-    "num_experts": num_experts,
-    "num_active_experts": num_active_experts,
-    "license": getattr(card, "license", None) if card else None,
-    "pipeline_tag": info.pipeline_tag,
-    "base_model": getattr(card, "base_model", None) if card else None,
-}
-print(json.dumps(result))
-"""
-        env = os.environ.copy()
-        env["MODEL_PATH"] = model_path
-        result_proc = subprocess.run(
-            ["python3", "-c", script],
-            capture_output=True, text=True, timeout=30,
-            env=env,
-        )
-        if result_proc.returncode != 0:
-            raise RuntimeError(result_proc.stderr[-300:])
-        result = json.loads(result_proc.stdout)
-        _set_cached(cache_key, result)
-        return result
-    except Exception as e:
-        return {"error": str(e), "model": model_path}
+    return fetch_model_info_data(model_path)
 
 
 @router.get("/api/miner/{uid}", tags=["Miners"], summary="Full miner details by UID",
@@ -210,7 +139,7 @@ def get_miner(uid: int):
     # Fallback: if metagraph hotkey is stale/missing, try uid_hotkey_map.json
     # (maintained by the validator every epoch - always current)
     if not hotkey or hotkey not in commitments:
-        uid_hk_map = _safe_json_load(os.path.join(STATE_DIR, "uid_hotkey_map.json"), {})
+        uid_hk_map = uid_hotkey_map()
         mapped_hk = uid_hk_map.get(str(uid))
         if mapped_hk and mapped_hk in commitments:
             hotkey = mapped_hk
@@ -221,13 +150,13 @@ def get_miner(uid: int):
         result["commitment"] = None
 
     # KL score
-    scores = _safe_json_load(os.path.join(STATE_DIR, "scores.json"), {})
+    scores = load_scores()
     uid_str = str(uid)
     result["kl_score"] = scores.get(uid_str)
 
     # Disqualification - check per-commit key first, fall back to legacy keys
     # only if no commit_block is known (same logic as eval/scoring.py is_disqualified)
-    dq = _safe_json_load(os.path.join(STATE_DIR, "disqualified.json"), {})
+    dq = disqualified()
     commit_block = result.get("commitment", {}).get("block") if result.get("commitment") else None
     dq_reason = None
     if commit_block is not None and hotkey:
@@ -238,7 +167,7 @@ def get_miner(uid: int):
     result["disqualified"] = dq_reason
 
     # Top 5 / king status
-    top4 = _safe_json_load(os.path.join(STATE_DIR, "top4_leaderboard.json"), {})
+    top4 = top4_leaderboard()
     king = top4.get("king") or {}
     contenders = top4.get("contenders") or []
     result["is_king"] = king.get("uid") == uid
@@ -251,10 +180,10 @@ def get_miner(uid: int):
     result["in_top5"] = uid in top5_uids
 
     # Eval status: why (not) evaluated
-    h2h_tracker = _safe_json_load(os.path.join(STATE_DIR, "h2h_tested_against_king.json"), {})
-    h2h_latest = _safe_json_load(os.path.join(STATE_DIR, "h2h_latest.json"), {})
-    current_king_uid = h2h_latest.get("king_uid")
-    current_block = h2h_latest.get("block", 0)
+    h2h_tracker = h2h_tested_against_king()
+    latest = h2h_latest()
+    current_king_uid = latest.get("king_uid")
+    current_block = latest.get("block", 0)
     tracker_entry = h2h_tracker.get(uid_str, {})
     eval_status = {}
     if result.get("disqualified"):

@@ -13,6 +13,7 @@ import { DocsTab } from "@/components/docs-tab";
 import { ChatTab } from "@/components/chat-tab";
 import { BenchmarksTab } from "@/components/benchmarks-tab";
 import { KingHistory } from "@/components/king-history";
+import { SCORE_TO_BEAT_FACTOR } from "@/lib/subnet";
 
 interface DashboardTabsProps {
   miners: MinerEntry[];
@@ -53,8 +54,7 @@ export function DashboardTabs({
   const [activeTab, setActiveTab] = useState("eval-rounds");
   const kingMiner = kingUid != null ? miners.find(m => m.uid === kingUid) : null;
 
-  const EPSILON = 0.01;
-  const scoreToBeat = kingH2hKl != null ? kingH2hKl * (1 - EPSILON) : null;
+  const scoreToBeat = kingH2hKl != null ? kingH2hKl * SCORE_TO_BEAT_FACTOR : null;
 
   return (
     <div className="space-y-3">

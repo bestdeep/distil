@@ -3,37 +3,72 @@
 import os
 import subprocess
 import time as _time
+from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi.responses import RedirectResponse
 
-from config import NETUID, STATE_DIR
-from helpers.sanitize import _safe_json_load
+from config import NETUID
+from state_store import eval_progress, h2h_latest, progress_value, scores, disqualified
 
-# Compute git revision once at import time
-# Try git first, fall back to REVISION file (for non-git deployments)
-try:
-    _code_revision = subprocess.check_output(
-        ["git", "rev-parse", "--short", "HEAD"],
-        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        stderr=subprocess.DEVNULL,
-        timeout=5,
-    ).decode().strip()
-except Exception:
-    _code_revision = None
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_REVISION_FILE_CANDIDATES = (
+    _REPO_ROOT / "REVISION",
+    _REPO_ROOT / "api" / "REVISION",
+)
 
-if not _code_revision:
-    for _rev_path in [
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "REVISION"),
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "REVISION"),
-    ]:
+
+def _revision_from_file() -> str | None:
+    for path in _REVISION_FILE_CANDIDATES:
         try:
-            with open(_rev_path) as _f:
-                _code_revision = _f.read().strip() or None
-            if _code_revision:
-                break
+            text = path.read_text().strip()
+            if text:
+                return text
         except Exception:
-            pass
+            continue
+    return None
+
+
+def _revision_from_git() -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=_REPO_ROOT,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        rev = out.decode().strip() or None
+        if not rev:
+            return None
+        dirty = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--"],
+            cwd=_REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+        return f"{rev}-dirty" if dirty.returncode == 1 else rev
+    except Exception:
+        return None
+
+
+# Refresh periodically so live prod picks up hotfixes without an API restart.
+_revision_cache: dict[str, float | str | None] = {"t": 0.0, "v": None}
+_REVISION_TTL_S = 45.0
+
+
+def _code_revision_live() -> str | None:
+    now = _time.time()
+    if (
+        _revision_cache["v"]
+        and now - float(_revision_cache["t"]) < _REVISION_TTL_S
+    ):
+        return str(_revision_cache["v"])
+    rev = _revision_from_git() or _revision_from_file()
+    _revision_cache["t"] = now
+    _revision_cache["v"] = rev
+    return rev
 
 router = APIRouter()
 
@@ -69,23 +104,24 @@ def health():
     eval_students_total = 0
     prog = {}
     try:
-        h2h = _safe_json_load(os.path.join(STATE_DIR, "h2h_latest.json"), {})
+        h2h = h2h_latest()
         last_eval_block = h2h.get("block")
         ts = h2h.get("timestamp")
         if ts:
             last_eval_age_min = round((_time.time() - ts) / 60, 1)
         king_uid = h2h.get("king_uid")
-        # Get king KL from scores
-        scores = _safe_json_load(os.path.join(STATE_DIR, "scores.json"), {})
-        n_scored = len(scores)
-        if king_uid and str(king_uid) in scores:
-            king_kl = scores[str(king_uid)]
-        dq = _safe_json_load(os.path.join(STATE_DIR, "disqualified.json"), {})
+        score_data = scores()
+        n_scored = len(score_data)
+        if king_uid is not None and str(king_uid) in score_data:
+            king_kl = score_data[str(king_uid)]
+        dq = disqualified()
         n_dq = len(dq)
-        prog = _safe_json_load(os.path.join(STATE_DIR, "eval_progress.json"), {})
+        prog = eval_progress()
         eval_active = prog.get("active", False)
         if eval_active:
-            eval_students_done = len(prog.get("completed", []))
+            eval_students_done = prog.get("students_done")
+            if eval_students_done is None:
+                eval_students_done = len(prog.get("completed", []))
             eval_students_total = prog.get("students_total", 0)
     except Exception:
         pass
@@ -94,22 +130,22 @@ def health():
         "netuid": NETUID,
         "dethrone_method": "paired_t_test",
         "king_uid": king_uid,
-        "king_kl": round(king_kl, 6) if king_kl else None,
+        "king_kl": round(king_kl, 6) if king_kl is not None else None,
         "n_scored": n_scored,
         "n_disqualified": n_dq,
         "last_eval_block": last_eval_block,
         "last_eval_age_min": last_eval_age_min,
         "eval_active": eval_active,
-        "code_revision": _code_revision,
+        "code_revision": _code_revision_live(),
         "eval_progress": {
             "phase": prog.get("phase"),
             "students_total": prog.get("students_total"),
-            "students_done": len(prog.get("completed", [])),
+            "students_done": eval_students_done,
             "prompts_total": prog.get("prompts_total"),
-            "current_student": prog.get("current", {}).get("student_name") if isinstance(prog.get("current"), dict) else None,
-            "current_prompt": prog.get("current", {}).get("prompts_done") if isinstance(prog.get("current"), dict) else None,
-            "current_kl": prog.get("current", {}).get("kl_running_mean") if isinstance(prog.get("current"), dict) else None,
-            "current_best": prog.get("current", {}).get("best_kl_so_far") if isinstance(prog.get("current"), dict) else None,
+            "current_student": progress_value(prog, "current_student", "student_name"),
+            "current_prompt": progress_value(prog, "current_prompt", "prompts_done"),
+            "current_kl": progress_value(prog, "current_kl", "kl_running_mean"),
+            "current_best": progress_value(prog, "current_best", "best_kl_so_far"),
             "teacher_prompts_done": prog.get("teacher_prompts_done"),
         } if eval_active else None,
     }

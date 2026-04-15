@@ -547,20 +547,22 @@ class TestPromptSampling(unittest.TestCase):
         self.assertGreater(len(shards), 50)
 
     def test_hash_hex_computation(self):
-        """Hash hex computation should strip 0x prefix correctly."""
-        from eval.dataset import sample_prompts_from_dataset
+        """Hash normalization should strip only the 0x prefix."""
+        from eval.dataset import sample_prompts_seeded
 
-        # The internal logic: if starts with 0x, strip it
-        block_hash = "0xabcdef1234"
-        expected = "abcdef1234"
-        # Direct test of the stripping logic
-        if block_hash.startswith("0x"):
-            result = block_hash.lstrip("0x")
-        else:
-            result = block_hash
-        # Note: lstrip("0x") strips any leading '0' or 'x' chars, not the string "0x"
-        # This is actually the behavior in the code — verify it matches
-        self.assertEqual(result, expected)
+        pool = [f"Prompt {i}" for i in range(100)]
+        with_prefix = sample_prompts_seeded(pool, 10, block_number=100, block_hash="0xabcdef1234")
+        without_prefix = sample_prompts_seeded(pool, 10, block_number=100, block_hash="abcdef1234")
+        self.assertEqual(with_prefix, without_prefix)
+
+    def test_hash_hex_preserves_leading_zeroes(self):
+        """Leading zeroes after 0x are part of the seed and must be preserved."""
+        from eval.dataset import sample_prompts_seeded
+
+        pool = [f"Prompt {i}" for i in range(100)]
+        with_leading_zero = sample_prompts_seeded(pool, 10, block_number=100, block_hash="0x00abcdef1234")
+        without_leading_zero = sample_prompts_seeded(pool, 10, block_number=100, block_hash="0xabcdef1234")
+        self.assertNotEqual(with_leading_zero, without_leading_zero)
 
     def test_sample_prompts_seeded_deterministic(self):
         """Seeded sampling should be deterministic."""
@@ -609,6 +611,31 @@ class TestPromptSampling(unittest.TestCase):
         binary_garbage = "\x01\x02\x03\x04\x05" * 100
         result = format_prompt(binary_garbage)
         self.assertEqual(result, "")
+
+    def test_prompt_cache_fallback_when_datasets_unavailable(self):
+        """Prompt sampling should fall back to cached history if datasets can't load."""
+        from eval.dataset import sample_prompts_from_dataset
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_dir = Path(tmpdir)
+            seed_prompts = [
+                f"Prompt {i} with enough text to be valid and deterministic for fallback sampling."
+                for i in range(10)
+            ]
+            (cache_dir / "block_1_10.json").write_text(json.dumps(seed_prompts))
+
+            with patch("eval.dataset._load_dataset_in_temp_hf_cache", side_effect=ImportError("datasets missing")):
+                sampled = sample_prompts_from_dataset(
+                    n=5,
+                    block_number=42,
+                    block_hash="0xabc123",
+                    cache_dir=cache_dir,
+                    min_chars=10,
+                    max_chars=200,
+                )
+
+            self.assertEqual(len(sampled), 5)
+            self.assertTrue(all(prompt in seed_prompts for prompt in sampled))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

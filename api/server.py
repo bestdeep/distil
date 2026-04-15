@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from config import API_DESCRIPTION
+from config import ALLOWED_ORIGINS, API_DESCRIPTION
 from helpers.rate_limit import _rate_limiter
 from helpers.cache import _bg_refresh
 from helpers.fetch import _fetch_metagraph, _fetch_commitments, _fetch_price
@@ -37,7 +37,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://distil.arbos.life", "http://localhost:3000", "http://localhost:5173"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )

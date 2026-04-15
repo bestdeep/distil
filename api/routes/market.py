@@ -1,13 +1,10 @@
 """Market data endpoints: price, TMC config, metagraph."""
 
-import traceback
-
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from config import NETUID, CACHE_TTL, TMC_BASE
-from helpers.cache import _get_cached, _get_stale, _set_cached, _bg_refresh
-from helpers.fetch import _fetch_metagraph, _fetch_price
+from config import NETUID, TMC_BASE
+from external import get_metagraph as load_metagraph, get_price as load_price
 
 router = APIRouter()
 
@@ -24,22 +21,7 @@ Response includes:
 """,
          response_description="Metagraph with all 256 UIDs and their on-chain metrics")
 def get_metagraph():
-    # Fast: return cache immediately, refresh in background if stale
-    cached = _get_cached("metagraph", CACHE_TTL)
-    if cached:
-        return JSONResponse(content=cached, headers={"Cache-Control": "public, max-age=30, stale-while-revalidate=60"})
-    # No fresh cache - return stale if available, and refresh in background
-    stale = _get_stale("metagraph")
-    if stale:
-        _bg_refresh("metagraph", _fetch_metagraph)
-        return JSONResponse(content=stale, headers={"Cache-Control": "public, max-age=30, stale-while-revalidate=60"})
-    # No cache at all - must block (first ever request)
-    try:
-        result = _fetch_metagraph()
-        _set_cached("metagraph", result)
-        return JSONResponse(content=result, headers={"Cache-Control": "public, max-age=30, stale-while-revalidate=60"})
-    except Exception as e:
-        return {"error": str(e), "traceback": traceback.format_exc()}
+    return JSONResponse(content=load_metagraph(), headers={"Cache-Control": "public, max-age=30, stale-while-revalidate=60"})
 
 
 @router.get("/api/price", tags=["Market"], summary="Token price and market data",
@@ -57,19 +39,7 @@ Response includes:
 **Cached for 30s.**
 """)
 def get_price():
-    cached = _get_cached("price", 30)
-    if cached:
-        return JSONResponse(content=cached, headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"})
-    stale = _get_stale("price")
-    if stale:
-        _bg_refresh("price", _fetch_price)
-        return JSONResponse(content=stale, headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"})
-    try:
-        result = _fetch_price()
-        _set_cached("price", result)
-        return JSONResponse(content=result, headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"})
-    except Exception as e:
-        return {"error": str(e)}
+    return JSONResponse(content=load_price(), headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"})
 
 
 @router.get("/api/tmc-config", tags=["Market"], summary="TaoMarketCap SSE config",

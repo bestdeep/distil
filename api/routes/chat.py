@@ -10,9 +10,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from config import STATE_DIR, DISK_CACHE_DIR, CHAT_POD_PORT, CHAT_POD_HOST, CHAT_POD_SSH_PORT, CHAT_POD_SSH_KEY
-from helpers.sanitize import _safe_json_load
 from helpers.ssh import _ssh_exec
 from helpers.rate_limit import _chat_rate_limiter
+from state_store import h2h_latest, read_cache, uid_hotkey_map
 
 router = APIRouter()
 
@@ -20,35 +20,19 @@ router = APIRouter()
 # ── King info helper ──────────────────────────────────────────────────────────
 
 def _get_king_info():
-    """Get king UID and model name."""
-    h2h = _safe_json_load(os.path.join(STATE_DIR, "h2h_latest.json"), {})
+    h2h = h2h_latest()
     king_uid = h2h.get("king_uid")
     if king_uid is None:
         return None, None
-
-    # Try h2h results first (has model directly)
     for r in h2h.get("results", []):
         if r.get("is_king") or r.get("uid") == king_uid:
             return king_uid, r.get("model")
-
-    # Fallback: commitments cache (hotkey-keyed, need metagraph for UID→hotkey)
-    metagraph = _safe_json_load(os.path.join(DISK_CACHE_DIR, "metagraph.json"), {})
-    commitments_data = _safe_json_load(os.path.join(DISK_CACHE_DIR, "commitments.json"), {})
+    commitments_data = read_cache("commitments", {})
     commitments = commitments_data.get("commitments", commitments_data) if isinstance(commitments_data, dict) else {}
-
-    # Build UID→hotkey from metagraph
-    uids = metagraph.get("uids", [])
-    hotkeys = metagraph.get("hotkeys", [])
-    king_hotkey = None
-    for i, uid in enumerate(uids):
-        if uid == king_uid and i < len(hotkeys):
-            king_hotkey = hotkeys[i]
-            break
-
+    king_hotkey = uid_hotkey_map().get(str(king_uid))
     if king_hotkey and king_hotkey in commitments:
         info = commitments[king_hotkey]
         return king_uid, info.get("model") if isinstance(info, dict) else info
-
     return king_uid, None
 
 

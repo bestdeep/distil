@@ -7,7 +7,9 @@ file upload/download, and command execution with retries.
 import json
 import os
 import re
+import shlex
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -70,6 +72,8 @@ class PodManager:
         self.lium = lium
         self.pod_name = pod_name
         self.pod = None
+        # Serialize SFTP/SSH — concurrent sessions to the same pod can drop the long eval channel.
+        self._io_lock = threading.Lock()
 
     def connect(self):
         """Find and connect to the named Lium pod.
@@ -94,15 +98,27 @@ class PodManager:
     def upload(self, local: str, remote: str, max_attempts: int = 5):
         """Upload a file to the pod with retries."""
         def _do():
-            self.lium.upload(self.pod, local=local, remote=remote)
+            with self._io_lock:
+                self.lium.upload(self.pod, local=local, remote=remote)
         _retry(_do, max_attempts=max_attempts, delay=10, label=f"Upload {local}")
         logger.info(f"Uploaded {local} → {remote}")
 
     def download(self, remote: str, local: str, max_attempts: int = 3):
         """Download a file from the pod with retries."""
         def _do():
-            self.lium.download(self.pod, remote=remote, local=local)
+            with self._io_lock:
+                self.lium.download(self.pod, remote=remote, local=local)
         _retry(_do, max_attempts=max_attempts, delay=5, label=f"Download {remote}")
+
+    def _prep_command(self, command: str, env: dict | None = None) -> str:
+        """Prepare a remote shell command with exported environment variables."""
+        if not env:
+            return command
+        exports = " && ".join(
+            f"export {key}={shlex.quote(str(value))}"
+            for key, value in env.items()
+        )
+        return f"{exports} && {command}"
 
     def exec(self, command: str, env: dict = None, timeout: int = None):
         """Execute a command on the pod. Returns the result dict.
@@ -110,19 +126,52 @@ class PodManager:
         If timeout is specified, raises TimeoutError if the command
         doesn't complete within that many seconds.
         """
-        import concurrent.futures
-        kwargs = {"command": command}
-        if env:
-            kwargs["env"] = env
-        if timeout is not None:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(self.lium.exec, self.pod, **kwargs)
-                try:
-                    return future.result(timeout=timeout)
-                except concurrent.futures.TimeoutError:
-                    logger.error(f"Pod exec timed out after {timeout}s: {command[:80]}")
-                    raise TimeoutError(f"Pod exec timed out after {timeout}s")
-        return self.lium.exec(self.pod, **kwargs)
+        full_command = self._prep_command(command, env)
+        started = time.time()
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+
+        # The upstream SDK waits for exit status before draining stdout/stderr.
+        # For long-running verbose eval jobs that can stall or break the session,
+        # so we drain both streams incrementally while the command runs.
+        with self._io_lock:
+            with self.lium.ssh_connection(self.pod, timeout=30) as client:
+                transport = client.get_transport()
+                if transport is not None:
+                    transport.set_keepalive(30)
+
+                stdin, stdout, stderr = client.exec_command(full_command)
+                stdin.close()
+                channel = stdout.channel
+                channel.settimeout(0.1)
+
+                while True:
+                    while channel.recv_ready():
+                        stdout_chunks.append(channel.recv(4096).decode("utf-8", errors="replace"))
+                    while channel.recv_stderr_ready():
+                        stderr_chunks.append(channel.recv_stderr(4096).decode("utf-8", errors="replace"))
+
+                    if channel.exit_status_ready() and not channel.recv_ready() and not channel.recv_stderr_ready():
+                        break
+
+                    if timeout is not None and (time.time() - started) > timeout:
+                        logger.error(f"Pod exec timed out after {timeout}s: {command[:80]}")
+                        try:
+                            channel.close()
+                        except Exception:
+                            pass
+                        raise TimeoutError(f"Pod exec timed out after {timeout}s")
+
+                    time.sleep(0.1)
+
+                exit_code = channel.recv_exit_status()
+
+        return {
+            "stdout": "".join(stdout_chunks),
+            "stderr": "".join(stderr_chunks),
+            "exit_code": exit_code,
+            "success": exit_code == 0,
+        }
 
     def is_alive(self, timeout: int = 15) -> bool:
         """Quick liveness check — returns True if the pod responds."""

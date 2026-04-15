@@ -18,14 +18,12 @@ from pathlib import Path
 from typing import Optional
 
 from huggingface_hub import hf_hub_download, model_info
+from eval.runtime import STATE_DIR as RUNTIME_STATE_DIR, TEACHER_CONFIG_VOCAB_SIZE, TEACHER_MODEL
 
 logger = logging.getLogger("distillation.model_checker")
 
-# Qwen3.5-35B-A3B: vocab_size=248320 in config (text_config.vocab_size)
-# Note: tokenizer.vocab_size reports 248044 but model config uses 248320 (padded)
-BASELINE_VOCAB_SIZE = 248320
-TEACHER_MODEL = "Qwen/Qwen3.5-35B-A3B"
-STATE_DIR = Path("state")
+BASELINE_VOCAB_SIZE = TEACHER_CONFIG_VOCAB_SIZE
+STATE_DIR = Path(RUNTIME_STATE_DIR)
 
 
 def compute_moe_params(config: dict) -> dict:

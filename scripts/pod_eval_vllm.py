@@ -92,6 +92,7 @@ ACTIVATION_FP_VOCAB_SIZE = 248320  # Qwen tokenizer vocab
 VLLM_PORT = 9100
 VLLM_URL = f"http://localhost:{VLLM_PORT}"
 VLLM_STARTUP_TIMEOUT = 900  # 15 min
+VLLM_REQUEST_TIMEOUT = 300
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # §3  GPU & Disk Utilities
@@ -754,7 +755,11 @@ def _generate_single_prompt(idx, prompt_text, max_new_tokens, block_seed,
 
     for attempt in range(3):
         try:
-            resp = requests.post(f"{VLLM_URL}/v1/completions", json=payload, timeout=300)
+            resp = requests.post(
+                f"{VLLM_URL}/v1/completions",
+                json=payload,
+                timeout=VLLM_REQUEST_TIMEOUT,
+            )
             resp.raise_for_status()
             data = resp.json()
             choice = data["choices"][0]
@@ -777,6 +782,11 @@ def _generate_single_prompt(idx, prompt_text, max_new_tokens, block_seed,
             return idx, result
         except Exception as e:
             if attempt < 2:
+                print(
+                    f"  [vllm] Prompt {idx} attempt {attempt + 1} failed: "
+                    f"{type(e).__name__}: {e}",
+                    flush=True,
+                )
                 time.sleep(2)
             else:
                 raise RuntimeError(f"vLLM generation failed for prompt {idx}: {e}")
@@ -1047,11 +1057,20 @@ def score_student_via_vllm(student_name, student_rev, full_sequences, prompt_len
             resp = None
             for attempt in range(3):
                 try:
-                    resp = req_lib.post(f"{VLLM_URL}/v1/completions", json=payload, timeout=300)
+                    resp = req_lib.post(
+                        f"{VLLM_URL}/v1/completions",
+                        json=payload,
+                        timeout=VLLM_REQUEST_TIMEOUT,
+                    )
                     resp.raise_for_status()
                     break
                 except Exception as e:
                     if attempt < 2:
+                        print(
+                            f"  [vllm-scoring] Batch {batch_start}-{batch_end} attempt {attempt + 1} failed: "
+                            f"{type(e).__name__}: {e}",
+                            flush=True,
+                        )
                         time.sleep(2)
                     else:
                         raise RuntimeError(f"vLLM request failed after 3 attempts: {e}")
@@ -2260,6 +2279,53 @@ def main():
     print(f"{'='*60}", flush=True)
 
     prefetch_executor.shutdown(wait=False)
+
+
+from pod_eval_lib.kl import (
+    KL_USE_COMPILED as _KL_USE_COMPILED_new,
+    build_token_to_id_map as _build_token_to_id_map_new,
+    compute_kl as _compute_kl_new,
+    compute_kl_from_precomputed as _compute_kl_from_precomputed_new,
+    compute_kl_from_sparse as _compute_kl_from_sparse_new,
+    compute_kl_sparse_vs_sparse as _compute_kl_sparse_vs_sparse_new,
+    dense_to_sparse_topk as _dense_to_sparse_topk_new,
+    is_sparse_logits as _is_sparse_logits_new,
+    kl_chunk_compiled as _kl_chunk_compiled_new,
+    kl_chunk_fn as _kl_chunk_fn_new,
+    vllm_logprobs_to_sparse as _vllm_logprobs_to_sparse_new,
+)
+from pod_eval_lib.models import (
+    clean_model_cache as _clean_model_cache_new,
+    compute_activation_fingerprint as _compute_activation_fingerprint_new,
+    ensure_disk_space as _ensure_disk_space_new,
+    free_gpu as _free_gpu_new,
+    gpu_mem_str as _gpu_mem_str_new,
+    hf_batched_forward as _hf_batched_forward_new,
+    load_model as _load_model_new,
+    prefetch_model as _prefetch_model_new,
+)
+from pod_eval_lib.progress import write_phase as _write_phase_new
+
+gpu_mem_str = _gpu_mem_str_new
+free_gpu = _free_gpu_new
+ensure_disk_space = _ensure_disk_space_new
+load_model = _load_model_new
+prefetch_model = _prefetch_model_new
+clean_model_cache = _clean_model_cache_new
+compute_activation_fingerprint = _compute_activation_fingerprint_new
+_kl_chunk_fn = _kl_chunk_fn_new
+_kl_chunk_compiled = _kl_chunk_compiled_new
+_KL_USE_COMPILED = _KL_USE_COMPILED_new
+compute_kl = _compute_kl_new
+compute_kl_from_precomputed = _compute_kl_from_precomputed_new
+_build_token_to_id_map = _build_token_to_id_map_new
+_is_sparse_logits = _is_sparse_logits_new
+vllm_logprobs_to_sparse = _vllm_logprobs_to_sparse_new
+dense_to_sparse_topk = _dense_to_sparse_topk_new
+compute_kl_from_sparse = _compute_kl_from_sparse_new
+compute_kl_sparse_vs_sparse = _compute_kl_sparse_vs_sparse_new
+hf_batched_forward = _hf_batched_forward_new
+_write_phase = _write_phase_new
 
 
 if __name__ == "__main__":

@@ -3,8 +3,7 @@
 import { useEffect, useState } from "react";
 import type { H2hHistoryResponse, H2hLatestResponse } from "@/lib/api";
 import { useRefreshKey } from "@/components/auto-refresh";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "https://api.arbos.life";
+import { CLIENT_API_BASE } from "@/lib/subnet";
 
 function formatTimestamp(ts: number): string {
   const d = new Date(ts * 1000);
@@ -285,7 +284,7 @@ export function H2hHistory() {
 
     async function fetchRounds() {
       try {
-        const res = await fetch(`${API_BASE}/api/h2h-history`, { cache: "no-store" });
+        const res = await fetch(`${CLIENT_API_BASE}/api/h2h-history`, { cache: "no-store" });
         if (!res.ok) { if (!cancelled) setError(true); return; }
         const data: H2hHistoryResponse | H2hLatestResponse[] = await res.json();
         const fetchedRounds = Array.isArray(data)

@@ -1,8 +1,8 @@
 "use client";
 
 import { Card, CardContent } from "@/components/ui/card";
-import { TEACHER } from "@/lib/api";
 import { formatParams } from "@/lib/utils";
+import { TEACHER } from "@/lib/subnet";
 
 interface DocsTabProps {
   scoreToBeat: number | null;
@@ -89,7 +89,7 @@ export function DocsTab({ scoreToBeat, kingKl }: DocsTabProps) {
         <section className="space-y-2">
           <h2 className="text-base font-semibold text-foreground">Model Requirements</h2>
           <ul className="list-disc pl-5 space-y-1">
-            <li><strong className="text-foreground">≤{formatParams(5_250_000_000)} total params</strong> — from safetensors metadata</li>
+            <li><strong className="text-foreground">≤{formatParams(TEACHER.maxStudentParams)} total params</strong> — from safetensors metadata</li>
             <li><strong className="text-foreground">Same tokenizer</strong> as teacher (vocab_size={TEACHER.vocabSize.toLocaleString()})</li>
             <li><strong className="text-foreground">No quantization</strong> — GPTQ/AWQ/FP8 rejected</li>
             <li><strong className="text-foreground">Unique weights</strong> — SHA256 duplicate detection</li>
@@ -155,7 +155,7 @@ python miner.py --wallet-name mywallet --hotkey-name myhotkey \\
             </div>
             <div>
               <span className="text-muted-foreground/60">Max Student</span>
-              <p className="font-mono text-foreground">{formatParams(5_250_000_000)}</p>
+              <p className="font-mono text-foreground">{formatParams(TEACHER.maxStudentParams)}</p>
             </div>
           </div>
         </section>
