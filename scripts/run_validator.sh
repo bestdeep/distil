@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/openclaw/distillation
+cd /home/openclaw/distil-paper
 source ~/.secrets/distil.env
 export HF_TOKEN="${HF_TOKEN:-$(cat ~/.cache/huggingface/token 2>/dev/null || echo '')}"
 export HF_HOME="/home/openclaw/.cache/validator-hf"
