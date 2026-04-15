@@ -10,7 +10,13 @@ install -m 0644 "$UNIT_SRC_DIR/distil-dashboard.service" "$UNIT_DST_DIR/distil-d
 install -m 0644 "$UNIT_SRC_DIR/distil-validator.service" "$UNIT_DST_DIR/distil-validator.service"
 install -m 0644 "$UNIT_SRC_DIR/distil-benchmark-sync.service" "$UNIT_DST_DIR/distil-benchmark-sync.service"
 install -m 0644 "$UNIT_SRC_DIR/distil-benchmark-sync.timer" "$UNIT_DST_DIR/distil-benchmark-sync.timer"
+if [[ -f "$UNIT_SRC_DIR/openclaw.service" ]]; then
+  install -m 0644 "$UNIT_SRC_DIR/openclaw.service" "$UNIT_DST_DIR/openclaw.service"
+fi
 
 systemctl daemon-reload
 systemctl enable distil-api distil-dashboard distil-validator
 systemctl enable --now distil-benchmark-sync.timer
+if [[ -f /root/.openclaw/openclaw.json ]] && command -v openclaw >/dev/null 2>&1; then
+  systemctl enable --now openclaw
+fi
