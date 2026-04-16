@@ -35,7 +35,7 @@ The validator uses a **king-of-the-hill** architecture for efficient, high-confi
 
 6. **vLLM-accelerated evaluation** — vLLM generates teacher continuations 5–10× faster than pure HuggingFace inference. Teacher logits are precomputed and cached on GPU.
 
-7. **Paired t-test dethronement (p < 0.01)** — A challenger dethrones the king if a one-sided paired t-test on per-prompt KL deltas is statistically significant at p < 0.01. All ~300 prompt-level data points are used, not just mean scores. Minimum 20 paired observations required. This prevents noise spammers from getting lucky wins with random weight perturbations.
+7. **Paired t-test dethronement (p < 0.03)** — A challenger dethrones the king if a one-sided paired t-test on per-prompt KL deltas is statistically significant at p < 0.03. All ~300 prompt-level data points are used, not just mean scores. Minimum 20 paired observations required. This prevents noise spammers from getting lucky wins with random weight perturbations.
 
 9. **Weight setting** — King gets weight=1.0, everyone else gets 0.0. Raw scores, no EMA smoothing. Weights are set on-chain immediately after each evaluation.
 
@@ -43,7 +43,7 @@ The validator uses a **king-of-the-hill** architecture for efficient, high-confi
 - **~300 prompts per model** → tight confidence intervals and reliable statistical testing
 - **Top-5 always evaluated** — leaderboard stays fresh even without new challengers
 - **Fair comparison** — all models scored on identical prompts in the same run
-- **Paired t-test at p<0.01** — the king holds unless a challenger is *statistically significantly* better
+- **Paired t-test at p<0.03** — the king holds unless a challenger is *statistically significantly* better
 - **Scales to many miners** — 100 miners with 1 new challenger = top-5 + 1 new model evaluated, not 100
 - **Revision pinning** — models evaluated at the specific committed revision; new HF commits = DQ
 
