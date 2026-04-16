@@ -642,11 +642,11 @@ def is_vllm_running():
         return False
 
 
-def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=16384, revision=None):
-    """Start vLLM server via subprocess. Returns True on success."""
+def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=16384, revision=None, _attempt=1):
+    """Start vLLM server via subprocess. Returns True on success. Retries once on crash."""
     ensure_disk_space(model_name, threshold=80)
 
-    print(f"\n[vllm] Starting server for {model_name}...", flush=True)
+    print(f"\n[vllm] Starting server for {model_name}..." + (f" (attempt {_attempt})" if _attempt > 1 else ""), flush=True)
     stop_vllm_server()
 
     cmd = [
@@ -691,6 +691,11 @@ def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=163
                 print(Path("/tmp/vllm_teacher.log").read_text()[-1500:], flush=True)
             except Exception:
                 pass
+            if _attempt < 2:
+                print("[vllm] Retrying after cleanup...", flush=True)
+                stop_vllm_server()
+                time.sleep(5)
+                return start_vllm_server(model_name, gpu_memory_utilization, max_model_len, revision, _attempt=2)
             return False
         if elapsed % 60 == 0 and elapsed > 0:
             print(f"[vllm] Still starting... ({elapsed}s)", flush=True)
@@ -702,7 +707,7 @@ def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=163
 
 
 def stop_vllm_server():
-    """Kill vLLM server and free VRAM."""
+    """Kill vLLM server, orphaned engine procs, and free VRAM."""
     pid_file = Path("/tmp/vllm_teacher.pid")
     if pid_file.exists():
         try:
@@ -726,8 +731,35 @@ def stop_vllm_server():
         subprocess.run(["fuser", "-k", f"{VLLM_PORT}/tcp"], capture_output=True, timeout=5)
     except Exception:
         pass
+    try:
+        subprocess.run(["pkill", "-9", "-f", "vllm.entrypoints"], capture_output=True, timeout=5)
+    except Exception:
+        pass
+    my_pid = os.getpid()
+    for _ in range(3):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=10
+            )
+            pids = [int(p.strip()) for p in result.stdout.strip().split("\n") if p.strip().isdigit() and int(p.strip()) != my_pid]
+            if not pids:
+                break
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
+            time.sleep(2)
+        except Exception:
+            break
+    try:
+        for shm in Path("/dev/shm").glob("vllm*"):
+            shm.unlink(missing_ok=True)
+    except Exception:
+        pass
     free_gpu()
-    time.sleep(5)  # Allow CUDA driver time to reclaim GPU memory from killed process
+    time.sleep(5)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2279,53 +2311,6 @@ def main():
     print(f"{'='*60}", flush=True)
 
     prefetch_executor.shutdown(wait=False)
-
-
-from pod_eval_lib.kl import (
-    KL_USE_COMPILED as _KL_USE_COMPILED_new,
-    build_token_to_id_map as _build_token_to_id_map_new,
-    compute_kl as _compute_kl_new,
-    compute_kl_from_precomputed as _compute_kl_from_precomputed_new,
-    compute_kl_from_sparse as _compute_kl_from_sparse_new,
-    compute_kl_sparse_vs_sparse as _compute_kl_sparse_vs_sparse_new,
-    dense_to_sparse_topk as _dense_to_sparse_topk_new,
-    is_sparse_logits as _is_sparse_logits_new,
-    kl_chunk_compiled as _kl_chunk_compiled_new,
-    kl_chunk_fn as _kl_chunk_fn_new,
-    vllm_logprobs_to_sparse as _vllm_logprobs_to_sparse_new,
-)
-from pod_eval_lib.models import (
-    clean_model_cache as _clean_model_cache_new,
-    compute_activation_fingerprint as _compute_activation_fingerprint_new,
-    ensure_disk_space as _ensure_disk_space_new,
-    free_gpu as _free_gpu_new,
-    gpu_mem_str as _gpu_mem_str_new,
-    hf_batched_forward as _hf_batched_forward_new,
-    load_model as _load_model_new,
-    prefetch_model as _prefetch_model_new,
-)
-from pod_eval_lib.progress import write_phase as _write_phase_new
-
-gpu_mem_str = _gpu_mem_str_new
-free_gpu = _free_gpu_new
-ensure_disk_space = _ensure_disk_space_new
-load_model = _load_model_new
-prefetch_model = _prefetch_model_new
-clean_model_cache = _clean_model_cache_new
-compute_activation_fingerprint = _compute_activation_fingerprint_new
-_kl_chunk_fn = _kl_chunk_fn_new
-_kl_chunk_compiled = _kl_chunk_compiled_new
-_KL_USE_COMPILED = _KL_USE_COMPILED_new
-compute_kl = _compute_kl_new
-compute_kl_from_precomputed = _compute_kl_from_precomputed_new
-_build_token_to_id_map = _build_token_to_id_map_new
-_is_sparse_logits = _is_sparse_logits_new
-vllm_logprobs_to_sparse = _vllm_logprobs_to_sparse_new
-dense_to_sparse_topk = _dense_to_sparse_topk_new
-compute_kl_from_sparse = _compute_kl_from_sparse_new
-compute_kl_sparse_vs_sparse = _compute_kl_sparse_vs_sparse_new
-hf_batched_forward = _hf_batched_forward_new
-_write_phase = _write_phase_new
 
 
 if __name__ == "__main__":

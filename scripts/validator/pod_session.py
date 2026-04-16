@@ -12,7 +12,7 @@ from scripts.validator.config import MAX_NEW_TOKENS, MAX_PROMPT_TOKENS, TEACHER_
 logger = logging.getLogger("distillation.remote_validator")
 
 
-def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: int, prompt_texts: list, state: ValidatorState, max_params_b: float, is_full_eval: bool, use_vllm: bool, eval_script: str, eval_script_remote: str, block_seed: int | None = None):
+def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: int, prompt_texts: list, state: ValidatorState, max_params_b: float, is_full_eval: bool, use_vllm: bool, eval_script: str, eval_script_remote: str):
     import shutil
     import threading
 
@@ -125,7 +125,6 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
         f"--teacher-logits {shlex.quote(teacher_cache_remote)}"
         f"{king_flag}"
         f"{vllm_flag}"
-        f"{f' --block-seed {block_seed}' if block_seed is not None else ''}"
     )
     inner_q = shlex.quote(inner_eval)
     start_cmd = (
@@ -185,12 +184,12 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
             except Exception:
                 pass
             try:
-                our_pid_str = pod.exec(f"cat {shlex.quote(pid_remote)} 2>/dev/null", timeout=10).get("stdout", "").strip()
                 pod.exec(
-                    f"for p in $(pgrep -f 'pod_eval' 2>/dev/null); do "
-                    f"  if [ \"$p\" != \"{our_pid_str}\" ]; then kill -9 $p 2>/dev/null; fi; "
-                    f"done; "
-                    f"rm -f /home/pod_eval.py /home/prompts.json 2>/dev/null",
+                    "for p in $(pgrep -f 'pod_eval' 2>/dev/null); do "
+                    "  cmdline=$(cat /proc/$p/cmdline 2>/dev/null | tr '\\0' ' '); "
+                    "  case \"$cmdline\" in *distil_eval_*) ;; *) kill -9 $p 2>/dev/null;; esac; "
+                    "done; "
+                    "rm -f /home/pod_eval.py /home/prompts.json /home/pod_eval_vllm.py 2>/dev/null",
                     timeout=15,
                 )
             except Exception:

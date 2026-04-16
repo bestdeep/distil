@@ -22,9 +22,12 @@ def init_pod(lium, pod_name: str, eval_script: str, eval_script_remote: str,
     pod.connect()
     print(f"[validator] Connected to pod: {pod.pod.name if pod.pod else '?'}", flush=True)
 
-    print("[validator] Uploading eval script...", flush=True)
-    pod.upload(eval_script, eval_script_remote, max_attempts=5)
-    print("[validator] Eval script uploaded", flush=True)
+    print("[validator] Cleaning stale /home/pod_eval.py...", flush=True)
+    try:
+        pod.exec("rm -f /home/pod_eval.py /home/eval_output.log /home/eval_progress.json /home/eval_results.json 2>/dev/null")
+    except Exception:
+        pass
+    print("[validator] Pod init complete (eval script uploaded per-round)", flush=True)
 
     print("[validator] Ensuring pod dependencies...", flush=True)
     pod.ensure_dependencies(teacher_model)
