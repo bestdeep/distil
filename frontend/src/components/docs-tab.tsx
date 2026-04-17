@@ -130,6 +130,31 @@ python miner.py --wallet-name mywallet --hotkey-name myhotkey \\
           </ul>
         </section>
 
+        <section id="anti-finetune" className="space-y-2 scroll-mt-20">
+          <h2 className="text-base font-semibold text-foreground">Fine-Tunability Requirement</h2>
+          <p className="text-xs text-muted-foreground/80">
+            Submitted models must be continuable-pretraining targets, not dead ends. Every student is
+            probed before scoring with a simple cross-entropy pass; models whose gradients explode or
+            whose layer norms have been inflated out of range are disqualified (DQ reason prefixed{" "}
+            <code className="font-mono text-foreground">anti-finetune:</code>).
+          </p>
+          <div className="rounded-lg border border-border/30 p-3 text-xs font-mono space-y-1">
+            <div><span className="text-muted-foreground/60">Probe input</span> → <span className="text-foreground">&quot;The capital of France is Paris. The capital of Germany is Berlin.&quot;</span></div>
+            <div><span className="text-muted-foreground/60">Probe mode</span> → <span className="text-foreground">forward + backward on labels=input_ids (standard causal CE loss)</span></div>
+            <div><span className="text-muted-foreground/60">DQ if</span> loss is <code>NaN</code>/<code>Inf</code></div>
+            <div><span className="text-muted-foreground/60">DQ if</span> any grad is <code>NaN</code>/<code>Inf</code></div>
+            <div><span className="text-muted-foreground/60">DQ if</span> global grad-norm &gt; <code className="text-danger">1000</code></div>
+            <div><span className="text-muted-foreground/60">DQ if</span> any per-param-type grad-norm &gt; <code className="text-danger">1000</code> (norm / embed / lm_head / attn / ffn / bias)</div>
+            <div><span className="text-muted-foreground/60">DQ if</span> any LayerNorm/RMSNorm weight <code>|w|</code><sub>max</sub> &gt; <code className="text-danger">100</code></div>
+          </div>
+          <p className="text-xs text-muted-foreground/70">
+            Thresholds are env-tunable (<code>FINETUNE_GRAD_NORM_MAX</code>,{" "}
+            <code>FINETUNE_NORM_WEIGHT_MAX</code>) and set generously — well-behaved distilled models
+            sit 1–3 orders of magnitude below. If you hit a false DQ, open a thread with your probe
+            numbers from the round card.
+          </p>
+        </section>
+
         <section className="space-y-2">
           <h2 className="text-base font-semibold text-foreground">Teacher Model</h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs rounded-lg border border-border/30 p-3">

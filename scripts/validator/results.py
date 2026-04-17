@@ -90,6 +90,30 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
             state.scores[str(uid)] = MAX_KL_THRESHOLD + 1
             state.evaluated_uids.add(str(uid))
             continue
+        if student_result.get("status") == "anti_finetune":
+            probe = student_result.get("finetune_probe", {}) or {}
+            raw_reason = student_result.get("reason") or probe.get("reason") or "anti_finetune"
+            detail = raw_reason.split("anti_finetune:", 1)[-1] if "anti_finetune:" in raw_reason else raw_reason
+            reason = (
+                f"anti-finetune: {detail} "
+                f"(loss={probe.get('loss','?')}, "
+                f"global_grad={probe.get('global_grad_norm','?')}, "
+                f"worst={probe.get('worst_param_type','?')}={probe.get('worst_param_norm','?')}, "
+                f"norm_w_max={probe.get('worst_norm_weight','?')}). "
+                f"Model cannot be continued-pretrained — see "
+                f"https://distil.arbos.life/docs#anti-finetune"
+            )
+            logger.info(f"UID {uid} ({model_name}): {reason}")
+            log_event(
+                f"UID {uid} ({model_name}) DQ: anti-finetune ({detail})",
+                level="warning", state_dir=str(state.state_dir),
+            )
+            hotkey = models_to_eval.get(uid, {}).get("hotkey", uid_to_hotkey.get(uid, str(uid)))
+            commit_block = models_to_eval.get(uid, {}).get("commit_block")
+            disqualify(hotkey, reason, state.dq_reasons, commit_block=commit_block)
+            state.scores[str(uid)] = MAX_KL_THRESHOLD + 1
+            state.evaluated_uids.add(str(uid))
+            continue
         speed_flag = student_result.get("speed_flag")
         if speed_flag:
             logger.warning(f"UID {uid} ({model_name}): ⚠️ {speed_flag}")

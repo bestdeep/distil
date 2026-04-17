@@ -252,6 +252,163 @@ def clean_model_cache(name, teacher_name=None):
         pass
 
 
+FINETUNE_PROBE_TEXT = "The capital of France is Paris. The capital of Germany is Berlin."
+FINETUNE_GRAD_NORM_MAX = float(os.environ.get("FINETUNE_GRAD_NORM_MAX", "1000"))
+FINETUNE_NORM_WEIGHT_MAX = float(os.environ.get("FINETUNE_NORM_WEIGHT_MAX", "100"))
+
+
+def _classify_probe_param(name: str) -> str:
+    n = name.lower()
+    if "norm" in n.rsplit(".", 1)[-1] or "layernorm" in n or "rmsnorm" in n:
+        return "norm"
+    if "embed" in n or "wte" in n or "tok_embeddings" in n:
+        return "embed"
+    if "lm_head" in n or "output_proj" in n:
+        return "lm_head"
+    if any(k in n for k in ["q_proj", "k_proj", "v_proj", "o_proj", "self_attn", "attention"]):
+        return "attn"
+    if any(k in n for k in ["mlp", "gate_proj", "up_proj", "down_proj", "ffn", "feed_forward", "experts"]):
+        return "ffn"
+    if n.endswith(".bias") or ".bias" in n:
+        return "bias"
+    return "other"
+
+
+def finetunability_probe(model, tokenizer, device="cuda"):
+    """Fine-tunability diagnostic inspired by mantaLLM / const / caseus (SN97 Discord).
+
+    Rejects models that can't be continued-pretrained over:
+      - LayerNorm/RMSNorm weights scaled beyond sane bounds (anti-finetune watermark)
+      - Gradient explosion on a trivial next-token CE loss
+      - NaN/Inf in loss or gradients
+      - Per-param-type norm imbalance (one group >> the rest)
+
+    Returns dict with pass, reason, stats. Never raises — errors return pass=True with note.
+    """
+    stats = {
+        "pass": True, "reason": "",
+        "global_grad_norm": 0.0,
+        "worst_param_type": "",
+        "worst_param_norm": 0.0,
+        "worst_norm_weight": 0.0,
+        "worst_norm_name": "",
+        "loss": 0.0,
+    }
+    try:
+        worst_name = ""
+        worst_val = 0.0
+        for nm, mod in model.named_modules():
+            cls = type(mod).__name__.lower()
+            if ("norm" in cls or cls.endswith("ln")) and hasattr(mod, "weight") and mod.weight is not None:
+                w = mod.weight.detach()
+                if not torch.isfinite(w).all():
+                    stats.update({"pass": False, "reason": f"norm_weight_nan_inf:{nm}", "worst_norm_name": nm})
+                    return stats
+                mx = float(w.float().abs().max().item())
+                if mx > worst_val:
+                    worst_val = mx
+                    worst_name = nm
+        stats["worst_norm_weight"] = round(worst_val, 4)
+        stats["worst_norm_name"] = worst_name
+        if worst_val > FINETUNE_NORM_WEIGHT_MAX:
+            stats["pass"] = False
+            stats["reason"] = f"norm_weight_scaled:{worst_name}={worst_val:.1f}>{FINETUNE_NORM_WEIGHT_MAX:.0f}"
+            return stats
+
+        was_training = model.training
+        model.train()
+        for p in model.parameters():
+            p.requires_grad_(True)
+            p.grad = None
+
+        ids = tokenizer(FINETUNE_PROBE_TEXT, return_tensors="pt").input_ids.to(device)
+        try:
+            with torch.enable_grad():
+                out = model(input_ids=ids, labels=ids)
+                loss = out.loss
+        except Exception as fwd_err:
+            if not was_training:
+                model.eval()
+            for p in model.parameters():
+                p.grad = None
+            stats.update({"pass": False, "reason": f"forward_failed:{str(fwd_err)[:120]}"})
+            return stats
+
+        loss_val = float(loss.detach().float().item()) if loss is not None else float("nan")
+        stats["loss"] = round(loss_val, 4)
+        if loss is None or not math.isfinite(loss_val):
+            if not was_training:
+                model.eval()
+            for p in model.parameters():
+                p.grad = None
+            stats.update({"pass": False, "reason": f"loss_nan_inf:{loss_val}"})
+            return stats
+
+        try:
+            loss.backward()
+        except Exception as bwd_err:
+            if not was_training:
+                model.eval()
+            for p in model.parameters():
+                p.grad = None
+            stats.update({"pass": False, "reason": f"backward_failed:{str(bwd_err)[:120]}"})
+            return stats
+
+        global_sq = 0.0
+        per_type_sq: dict = {}
+        for nm, p in model.named_parameters():
+            if p.grad is None:
+                continue
+            g = p.grad.detach()
+            if not torch.isfinite(g).all():
+                if not was_training:
+                    model.eval()
+                for pp in model.parameters():
+                    pp.grad = None
+                stats.update({"pass": False, "reason": f"grad_nan_inf:{nm}"})
+                return stats
+            n_sq = float((g.float() ** 2).sum().item())
+            global_sq += n_sq
+            ptype = _classify_probe_param(nm)
+            per_type_sq[ptype] = per_type_sq.get(ptype, 0.0) + n_sq
+
+        for p in model.parameters():
+            p.grad = None
+        if not was_training:
+            model.eval()
+
+        global_norm = global_sq ** 0.5
+        stats["global_grad_norm"] = round(global_norm, 2)
+        if global_norm > FINETUNE_GRAD_NORM_MAX:
+            stats["pass"] = False
+            stats["reason"] = f"grad_explode:global={global_norm:.1f}>{FINETUNE_GRAD_NORM_MAX:.0f}"
+            return stats
+
+        worst_type = ""
+        worst_norm = 0.0
+        for ptype, sq in per_type_sq.items():
+            n = sq ** 0.5
+            if n > worst_norm:
+                worst_norm = n
+                worst_type = ptype
+        stats["worst_param_type"] = worst_type
+        stats["worst_param_norm"] = round(worst_norm, 2)
+        if worst_norm > FINETUNE_GRAD_NORM_MAX:
+            stats["pass"] = False
+            stats["reason"] = f"grad_explode:{worst_type}={worst_norm:.1f}>{FINETUNE_GRAD_NORM_MAX:.0f}"
+            return stats
+
+        return stats
+    except Exception as e:
+        try:
+            for p in model.parameters():
+                p.grad = None
+        except Exception:
+            pass
+        stats["reason"] = f"probe_error:{str(e)[:120]}"
+        return stats
+
+
 def compute_activation_fingerprint(model, device="cuda"):
     """
     Compute an activation-space fingerprint for functional copy detection.
@@ -1597,6 +1754,55 @@ def main():
             if is_king:
                 king_model = student
                 print(f"[eval] King loaded — stays in VRAM", flush=True)
+
+        # ── Fine-tunability probe (anti-finetune defense) ──
+        # Based on mantaLLM's Discord diagnostic: reject models that can't be
+        # continued-pretrained over due to grad-norm explosion or scaled layer norms.
+        # King already passed when it was crowned, so skip to save ~10s/round.
+        if student is not None and not is_king and os.environ.get("FINETUNE_PROBE", "1") != "0":
+            try:
+                _fp_start = time.time()
+                probe = finetunability_probe(student, tokenizer, device)
+                _fp_dur = time.time() - _fp_start
+                mark = "✓" if probe["pass"] else f"✗ DQ: {probe['reason']}"
+                print(
+                    f"[eval] Finetune probe: loss={probe['loss']:.3f} "
+                    f"global_grad={probe['global_grad_norm']:.1f} "
+                    f"worst={probe['worst_param_type']}={probe['worst_param_norm']:.1f} "
+                    f"norm_w_max={probe['worst_norm_weight']:.2f} "
+                    f"({_fp_dur:.1f}s) {mark}",
+                    flush=True,
+                )
+                results["students"].setdefault(student_name, {})["finetune_probe"] = {
+                    "pass": probe["pass"],
+                    "reason": probe.get("reason", ""),
+                    "global_grad_norm": probe["global_grad_norm"],
+                    "worst_param_type": probe["worst_param_type"],
+                    "worst_param_norm": probe["worst_param_norm"],
+                    "worst_norm_weight": probe["worst_norm_weight"],
+                    "worst_norm_name": probe.get("worst_norm_name", ""),
+                    "loss": probe["loss"],
+                }
+                if not probe["pass"]:
+                    results["students"][student_name].update({
+                        "status": "anti_finetune",
+                        "reason": f"anti_finetune:{probe['reason']}",
+                        "kl_global_avg": float("inf"),
+                    })
+                    with open(args.output, "w") as f:
+                        json.dump(results, f, indent=2)
+                    live_progress["completed"].append({"student_name": student_name, "status": "anti_finetune"})
+                    live_progress["current"] = None
+                    _write_progress()
+                    try:
+                        del student
+                    except Exception:
+                        pass
+                    free_gpu()
+                    clean_model_cache(student_name, args.teacher)
+                    continue
+            except Exception as e:
+                print(f"[eval] Finetune probe error (non-fatal, allowing): {e}", flush=True)
 
         # ── Activation fingerprint (for functional copy detection) ──
         if student is not None:
