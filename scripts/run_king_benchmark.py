@@ -16,8 +16,12 @@ VLLM_URL = os.environ.get("VLLM_URL", "http://127.0.0.1:8100/v1")
 VLLM_MODEL_ID = os.environ.get("VLLM_MODEL_ID", "sn97-king")
 API_URL = os.environ.get("PUBLIC_API_URL", "https://api.arbos.life")
 DASHBOARD_DIR = Path(os.environ.get("DASHBOARD_DIR", str(REPO / "state" / "benchmarks")))
-LIMIT = int(os.environ.get("LIMIT", "200"))
+_limit_env = os.environ.get("LIMIT", "").strip().lower()
+LIMIT = None if _limit_env in ("", "0", "none", "full") else int(_limit_env)
+BATCH_SIZE = int(os.environ.get("EVAL_BATCH_SIZE", "128"))
 WORK_DIR = os.environ.get("EVAL_WORK_DIR", "/tmp/king_benchmark")
+OUT_NAME = os.environ.get("OUT_NAME", "")
+IS_BASELINE = os.environ.get("IS_BASELINE", "").lower() in ("1", "true", "yes")
 LOG = sys.stdout
 
 def log(msg):
@@ -144,7 +148,7 @@ def run_one(cfg_cls, run_fn, bench, extra_dataset_args):
             "max_tokens": MAX_TOKENS.get(bench, 4096),
             "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
         },
-        eval_batch_size=16 if MAX_TOKENS.get(bench, 4096) >= 8192 else 32,
+        eval_batch_size=BATCH_SIZE,
         ignore_errors=True,
         model_args={"timeout": 1800, "max_retries": 1},
     )
@@ -178,20 +182,28 @@ def main():
     from evalscope import TaskConfig, run_task
 
     DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
-    king_uid, king_model, king_kl = fetch_king()
-    log(f"king uid={king_uid} model={king_model} kl={king_kl}")
+    if IS_BASELINE:
+        king_uid = None
+        king_model = os.environ.get("KING_MODEL") or VLLM_MODEL_ID
+        king_kl = None
+        log(f"baseline model={king_model}")
+    else:
+        king_uid, king_model, king_kl = fetch_king()
+        log(f"king uid={king_uid} model={king_model} kl={king_kl}")
 
     if not wait_vllm_ready(VLLM_MODEL_ID):
         log(f"fatal: vLLM not ready at {VLLM_URL}")
         sys.exit(2)
 
     results = {}
+    counts = {}
     started = time.time()
     for bench in BENCHMARKS:
         try:
             r = run_one(TaskConfig, run_task, bench, None)
             if r is not None:
                 results[bench] = r["score"]
+                counts[bench] = r["n"]
         except Exception as e:
             import traceback; traceback.print_exc()
             log(f"[{bench}] FAILED: {e}")
@@ -201,13 +213,19 @@ def main():
         "model": king_model,
         "kl": king_kl,
         "completed": True,
-        "is_king": True,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "limit": LIMIT,
         "benchmarks": results,
+        "counts": counts,
         "eval_seconds": round(time.time() - started, 1),
     }
-    out_path = DASHBOARD_DIR / f"uid_{king_uid}.json"
+    if IS_BASELINE:
+        out["is_baseline"] = True
+        out_name = OUT_NAME or f"baseline_{re.sub(r'[^a-zA-Z0-9]+', '_', king_model).strip('_').lower()}.json"
+    else:
+        out["is_king"] = True
+        out_name = OUT_NAME or f"uid_{king_uid}.json"
+    out_path = DASHBOARD_DIR / out_name
     out_path.write_text(json.dumps(out, indent=2))
     try:
         os.chmod(out_path, 0o644)

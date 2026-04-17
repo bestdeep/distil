@@ -1,5 +1,12 @@
 """
-Full-distribution KL-divergence computation on GPU tensors.
+KL-divergence computation on GPU tensors.
+
+Prod path (sparse): teacher runs on vLLM with `--max-logprobs 128`, so
+`compute_kl_from_sparse` (in scripts/pod_eval_vllm.py) renormalizes both
+teacher and student over the shared top-128 support.
+
+Dense path (full-vocab) is available here for reference / offline replays
+but is not used in prod for bandwidth reasons (~150GB/round at vocab=248,320).
 
 Production approach:
 1. Pre-generate teacher continuations ONCE per epoch (cached on CPU)

@@ -30,7 +30,8 @@ interface DashboardTabsProps {
 const TABS = [
   { id: "live", label: "Live", hint: "king · eval · GPU" },
   { id: "rounds", label: "Rounds", hint: "H2H · dethronements" },
-  { id: "miners", label: "Miners", hint: "leaderboard · benchmarks" },
+  { id: "miners", label: "Miners", hint: "leaderboard" },
+  { id: "benchmarks", label: "Benchmarks", hint: "king vs baseline" },
 ] as const;
 
 const CHAT_URL = "https://chat.arbos.life";
@@ -112,7 +113,6 @@ export function DashboardTabs({
   kingH2hKl,
 }: DashboardTabsProps) {
   const [activeTab, setActiveTab] = useState<string>("live");
-  const [minersView, setMinersView] = useState<"leaderboard" | "benchmarks">("leaderboard");
   const kingMiner = kingUid != null ? miners.find((m) => m.uid === kingUid) : null;
 
   const scoreToBeat = kingH2hKl != null ? kingH2hKl * SCORE_TO_BEAT_FACTOR : null;
@@ -187,39 +187,18 @@ export function DashboardTabs({
         </TabsContent>
 
         <TabsContent value="miners" className="pt-4 space-y-3">
-          <div className="flex gap-2 text-xs" role="tablist" aria-label="Miners view">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={minersView === "leaderboard"}
-              onClick={() => setMinersView("leaderboard")}
-              className={`px-3 py-1 rounded-full border ${minersView === "leaderboard" ? "border-foreground/40 bg-secondary/60" : "border-border/30 text-muted-foreground hover:bg-secondary/40"}`}
-            >
-              Leaderboard
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={minersView === "benchmarks"}
-              onClick={() => setMinersView("benchmarks")}
-              className={`px-3 py-1 rounded-full border ${minersView === "benchmarks" ? "border-foreground/40 bg-secondary/60" : "border-border/30 text-muted-foreground hover:bg-secondary/40"}`}
-            >
-              Benchmarks
-            </button>
-          </div>
+          <MinersTab
+            miners={miners}
+            scores={scores}
+            modelInfoMap={modelInfoMap}
+            currentBlock={currentBlock}
+            taoUsd={taoUsd}
+            minersTaoDay={minersTaoDay}
+          />
+        </TabsContent>
 
-          {minersView === "leaderboard" ? (
-            <MinersTab
-              miners={miners}
-              scores={scores}
-              modelInfoMap={modelInfoMap}
-              currentBlock={currentBlock}
-              taoUsd={taoUsd}
-              minersTaoDay={minersTaoDay}
-            />
-          ) : (
-            <BenchmarksTab />
-          )}
+        <TabsContent value="benchmarks" className="pt-4">
+          <BenchmarksTab />
         </TabsContent>
 
       </Tabs>

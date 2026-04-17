@@ -11,9 +11,11 @@ interface BenchmarkPayload {
   is_king?: boolean;
   completed?: boolean;
   benchmarks: Record<string, number | null>;
+  counts?: Record<string, number | null>;
   timestamp?: string | number;
   fetched_at?: number;
-  limit?: number;
+  limit?: number | null;
+  eval_seconds?: number;
 }
 
 interface BenchmarksResponse {
@@ -132,8 +134,10 @@ export function BenchmarksTab() {
               · refreshed {formatRelative(latest.fetched_at)}
             </span>
           )}
-          {latest.limit && (
+          {latest.limit ? (
             <span className="ml-1 text-muted-foreground/50">· {latest.limit} samples/task</span>
+          ) : (
+            <span className="ml-1 text-muted-foreground/50">· full eval sets</span>
           )}
         </p>
       </div>
@@ -220,7 +224,7 @@ export function BenchmarksTab() {
                     </>
                   )}
                   <td className="px-4 py-2.5 text-right font-mono tabular-nums text-muted-foreground/70">
-                    {latest.limit ?? "—"}
+                    {latest.counts?.[k] ?? latest.limit ?? "—"}
                   </td>
                 </tr>
               );

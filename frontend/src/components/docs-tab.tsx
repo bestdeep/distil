@@ -51,10 +51,12 @@ export function DocsTab({ scoreToBeat, kingKl }: DocsTabProps) {
           <h2 className="text-base font-semibold text-foreground">Scoring</h2>
           <p>
             The validator generates 512-token continuations with vLLM-accelerated inference (5–10× faster
-            than HF), then extracts full-vocab logits for scoring.
-            Your model&apos;s distribution is compared using{" "}
-            <strong className="text-foreground">KL divergence</strong> across all{" "}
-            {TEACHER.vocabSize.toLocaleString()} tokens. Lower KL = better.
+            than HF), then extracts the teacher&apos;s top-128 logprobs per position
+            (<code className="font-mono text-muted-foreground">--max-logprobs 128</code>).
+            Your model computes a full-vocab softmax over all {TEACHER.vocabSize.toLocaleString()} tokens,
+            gathers + renormalizes over the teacher&apos;s top-128 support, and is compared using{" "}
+            <strong className="text-foreground">sparse top-128 KL divergence</strong>.
+            Lower KL = better. (Full-vocab dense path exists for reference; disabled in prod — ~150 GB/round at vocab size.)
           </p>
           <p>
             Each eval uses 60 prompts from{" "}
@@ -125,7 +127,7 @@ python miner.py --wallet-name mywallet --hotkey-name myhotkey \\
           <ul className="list-disc pl-5 space-y-1">
             <li><strong className="text-foreground">Copy detection</strong> — SHA256 hash tracking; first committer owns the weights</li>
             <li><strong className="text-foreground">Block-hash seeded prompts</strong> — unpredictable before finalization</li>
-            <li><strong className="text-foreground">Full-distribution KL</strong> — all {TEACHER.vocabSize.toLocaleString()} tokens, not top-k</li>
+            <li><strong className="text-foreground">Sparse top-128 KL</strong> — teacher returns top-128 logprobs per position via vLLM (<code className="font-mono text-muted-foreground">--max-logprobs 128</code>); student computes full-vocab softmax over all {TEACHER.vocabSize.toLocaleString()} tokens then gathers + renormalizes over the teacher&apos;s top-128 support. Proper KL over the shared 128-token support. Full-vocab path (dense teacher logits) is available in-code for reference but disabled in prod for bandwidth reasons.</li>
             <li><strong className="text-foreground">Integrity checks</strong> — models must stay public and unchanged</li>
           </ul>
         </section>

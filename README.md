@@ -12,7 +12,7 @@ A Bittensor subnet for competitive model distillation of **Qwen/Qwen3.5-35B-A3B*
 
 **Miners** distill the teacher into a smaller model (≤5.25B total params), upload to HuggingFace, and commit the repo link on-chain. **One commitment per hotkey — commitments are permanent and cannot be changed.** However, if disqualified, miners can register a new hotkey and submit a different model.
 
-**Validators** evaluate by computing full-distribution KL-divergence on GPU using a vLLM-accelerated pipeline. Lower KL = better distillation = higher rewards. **Winner-take-all** — best miner gets 100% of emissions.
+**Validators** evaluate by computing top-128 sparse KL-divergence on GPU using a vLLM-accelerated pipeline (teacher returns top-128 logprobs per position; student softmaxes over the full 248,320-token vocab then gathers + renormalizes to the shared 128-token support). Lower KL = better distillation = higher rewards. **Winner-take-all** — best miner gets 100% of emissions.
 
 ### King-of-the-Hill Evaluation
 
@@ -69,7 +69,7 @@ Disqualification reasons are shown on the dashboard and available via the API.
 - **MoE-aware param counting**: Total params from safetensors metadata (not config estimates)
 - **Quantization rejected**: GPTQ/AWQ/FP8 all blocked — architecture distillation only
 - **Block-hash seeded prompts**: Deterministic from on-chain block hash, unpredictable before block finalization
-- **Full-distribution KL**: Scored on all 248,320 tokens, not top-k
+- **Top-128 sparse KL**: Teacher returns top-128 logprobs per position (`--max-logprobs 128` on vLLM). Student softmaxes over the full 248,320-token vocab, then gathers + renormalizes to the same 128 positions for a proper KL on the shared support. Full-vocab dense path exists in `compute_kl_from_precomputed` for reference; disabled in prod for bandwidth (~150GB/round at full vocab).
 
 ## Mining Guide
 
@@ -276,7 +276,7 @@ All endpoints are public, no authentication required.
 ├── test_miner.py             # Pre-submission validator (runs all 15 checks locally)
 ├── check_model.py            # Pre-submission checker (13 pre-GPU + 4 GPU checks)
 ├── eval/
-│   ├── kl_divergence.py      # Full-distribution KL on GPU
+│   ├── kl_divergence.py      # Sparse top-128 KL on GPU (dense path available for offline replays)
 │   ├── model_checker.py      # Param counting, integrity, hash, duplicate detection
 │   ├── dataset.py            # ClimbMix-400B dataset loader (120 prompts, block-hash seeded shard selection)
 │   └── scoring.py            # Winner-take-all + paired t-test dethronement

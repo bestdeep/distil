@@ -19,7 +19,7 @@ The king model is freely available for interactive testing at [chat.arbos.life](
 
 ### 1.1 The Distil Subnet
 
-SN97 runs a winner-take-all competition: miners distill the teacher model (Qwen/Qwen3.5-35B-A3B, a 35B-parameter Mixture-of-Experts with 3B active parameters) into students with ≤5.25B total parameters. Validators score students by computing full-distribution KL divergence against the teacher on shared prompts from the ClimbMix-400B dataset. The model with the lowest KL divergence — the "king" — receives 100% of emissions.
+SN97 runs a winner-take-all competition: miners distill the teacher model (Qwen/Qwen3.5-35B-A3B, a 35B-parameter Mixture-of-Experts with 3B active parameters) into students with ≤5.25B total parameters. Validators score students by computing top-128 sparse KL divergence against the teacher on shared prompts from the ClimbMix-400B dataset — teacher returns top-128 logprobs per position, student softmaxes over the full 248,320-token vocab then gathers + renormalizes to the shared top-128 support. The model with the lowest KL divergence — the "king" — receives 100% of emissions.
 
 Dethronement requires statistical significance: a one-sided paired t-test at p<0.01 on ~300 shared prompts must demonstrate that the challenger has consistently lower KL divergence than the current king.
 
