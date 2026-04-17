@@ -664,6 +664,7 @@ def main():
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help=f"Samples per benchmark (default: {DEFAULT_LIMIT})")
     parser.add_argument("--keep-pod", action="store_true", help="Don't destroy the pod after benchmarks")
     parser.add_argument("--json", help="Save raw results to this JSON file")
+    parser.add_argument("--dashboard-dir", help="Write dashboard-format uid_<king>.json + baseline file into this dir (e.g. state/benchmarks)")
     args = parser.parse_args()
 
     log("=" * 60)
@@ -737,6 +738,31 @@ def main():
             }
             Path(args.json).write_text(json.dumps(raw, indent=2))
             log(f"Raw results saved to {args.json}")
+
+        if args.dashboard_dir:
+            out_dir = Path(args.dashboard_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            king_path = out_dir / f"uid_{king_info['uid']}.json"
+            baseline_path = out_dir / "baseline_qwen35_4b.json"
+            king_path.write_text(json.dumps({
+                "uid": king_info["uid"],
+                "model": king_info["model"],
+                "kl": king_info["kl"],
+                "completed": True,
+                "is_king": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "limit": args.limit,
+                "benchmarks": king_scores,
+            }, indent=2))
+            baseline_path.write_text(json.dumps({
+                "uid": None,
+                "model": args.baseline,
+                "is_baseline": True,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "limit": args.limit,
+                "benchmarks": baseline_scores,
+            }, indent=2))
+            log(f"Dashboard files: {king_path.name}, {baseline_path.name}")
 
         log("✅ Benchmark complete!")
 

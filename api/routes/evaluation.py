@@ -14,6 +14,7 @@ from helpers.cache import _get_stale
 from helpers.sanitize import _sanitize_floats, _safe_json_load
 from state_store import (
     benchmarks,
+    current_round,
     eval_data_file,
     eval_progress,
     h2h_history,
@@ -233,6 +234,76 @@ When `active: false`, the validator is idle between rounds.
 """)
 def get_eval_progress():
     return normalize_eval_progress(eval_progress())
+
+
+@router.get("/api/queue", tags=["Evaluation"], summary="Current eval queue",
+         description="""Returns the current eval round's composition and per-slot status.
+
+Response:
+- `active`: whether a round is in flight (from eval_progress)
+- `phase`: current phase (`teacher_generation`, `student_eval`, idle, …)
+- `block` / `block_hash`: chain context the round was seeded from
+- `king_uid`: current king for this round
+- `started_at` / `estimated_completion`: timestamps (epoch seconds)
+- `students_total` / `students_done` / `prompts_total` / `prompts_done`: progress counters
+- `slots[]`: ordered list of `{uid, model, role, status}` where `status` ∈
+  `running` | `done` | `pending`. `role` is `king` | `challenger` | `reference`.
+- `top4_leaderboard_contenders[]`: UIDs that the H2H leaderboard expects to be
+  in this round. Useful for miners verifying they weren't dropped.
+
+Cache: 5 s.
+""")
+def get_queue():
+    prog = normalize_eval_progress(eval_progress()) or {}
+    rnd = current_round() or {}
+    lb = top4_leaderboard() or {}
+
+    eval_order = prog.get("eval_order") or []
+    models_done = prog.get("models") if isinstance(prog.get("models"), dict) else {}
+    current_model = prog.get("current_model")
+    completed_uids = set()
+    if isinstance(prog.get("completed"), list):
+        completed_uids = {int(u) for u in prog["completed"] if isinstance(u, (int, str)) and str(u).lstrip("-").isdigit()}
+
+    slots = []
+    for entry in eval_order:
+        uid = entry.get("uid")
+        model = entry.get("model")
+        role = entry.get("role")
+        if uid in completed_uids:
+            status = "done"
+        elif model and model == current_model:
+            status = "running"
+        elif model and model in models_done and (models_done.get(model) or {}).get("status") in ("done", "ok"):
+            status = "done"
+        else:
+            status = "pending"
+        slots.append({"uid": uid, "model": model, "role": role, "status": status})
+
+    lb_contenders = [c.get("uid") for c in (lb.get("contenders") or []) if c.get("uid") is not None]
+
+    payload = {
+        "active": bool(prog.get("active")),
+        "phase": prog.get("phase"),
+        "block": rnd.get("block") or prog.get("block"),
+        "block_hash": rnd.get("block_hash"),
+        "king_uid": prog.get("king_uid") or rnd.get("king_uid"),
+        "started_at": prog.get("started_at") or rnd.get("started_at"),
+        "estimated_completion": prog.get("estimated_completion"),
+        "estimated_duration_s": prog.get("estimated_duration_s"),
+        "students_total": prog.get("students_total"),
+        "students_done": prog.get("students_done"),
+        "prompts_total": prog.get("prompts_total"),
+        "prompts_done": prog.get("prompts_done"),
+        "teacher_prompts_done": prog.get("teacher_prompts_done"),
+        "slots": slots,
+        "top4_leaderboard_contenders": lb_contenders,
+        "pod": prog.get("pod"),
+    }
+    return JSONResponse(
+        content=_sanitize_floats(payload),
+        headers={"Cache-Control": "public, max-age=5, stale-while-revalidate=15"},
+    )
 
 
 @router.get("/api/h2h-latest", tags=["Evaluation"], summary="Latest head-to-head round",

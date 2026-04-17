@@ -112,14 +112,25 @@ def benchmarks():
         return [], None
     models = []
     baseline = None
-    for name in sorted(os.listdir(path)):
+    entries = []
+    for name in os.listdir(path):
         if not name.endswith(".json"):
             continue
-        data = _read(os.path.join(path, name), None)
+        full = os.path.join(path, name)
+        try:
+            mtime = os.path.getmtime(full)
+        except OSError:
+            mtime = 0
+        entries.append((mtime, name, full))
+    entries.sort(key=lambda e: e[0], reverse=True)
+    for mtime, _, full in entries:
+        data = _read(full, None)
         if not isinstance(data, dict):
             continue
+        data.setdefault("fetched_at", mtime)
         if data.get("is_baseline"):
-            baseline = data
+            if baseline is None:
+                baseline = data
         else:
             models.append(data)
     return models, baseline

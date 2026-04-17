@@ -143,15 +143,39 @@ python miner.py --wallet-name mywallet --hotkey-name myhotkey \\
             <div><span className="text-muted-foreground/60">Probe mode</span> → <span className="text-foreground">forward + backward on labels=input_ids (standard causal CE loss)</span></div>
             <div><span className="text-muted-foreground/60">DQ if</span> loss is <code>NaN</code>/<code>Inf</code></div>
             <div><span className="text-muted-foreground/60">DQ if</span> any grad is <code>NaN</code>/<code>Inf</code></div>
-            <div><span className="text-muted-foreground/60">DQ if</span> global grad-norm &gt; <code className="text-danger">1000</code></div>
-            <div><span className="text-muted-foreground/60">DQ if</span> any per-param-type grad-norm &gt; <code className="text-danger">1000</code> (norm / embed / lm_head / attn / ffn / bias)</div>
-            <div><span className="text-muted-foreground/60">DQ if</span> any LayerNorm/RMSNorm weight <code>|w|</code><sub>max</sub> &gt; <code className="text-danger">100</code></div>
+            <div><span className="text-muted-foreground/60">DQ if</span> global grad-norm &gt; <code className="text-danger">500</code></div>
+            <div><span className="text-muted-foreground/60">DQ if</span> any per-param-type grad-norm &gt; <code className="text-danger">500</code> (norm / embed / lm_head / attn / ffn / bias)</div>
+            <div><span className="text-muted-foreground/60">DQ if</span> any LayerNorm/RMSNorm weight <code>|w|</code><sub>max</sub> &gt; <code className="text-danger">30</code></div>
           </div>
           <p className="text-xs text-muted-foreground/70">
             Thresholds are env-tunable (<code>FINETUNE_GRAD_NORM_MAX</code>,{" "}
-            <code>FINETUNE_NORM_WEIGHT_MAX</code>) and set generously — well-behaved distilled models
-            sit 1–3 orders of magnitude below. If you hit a false DQ, open a thread with your probe
-            numbers from the round card.
+            <code>FINETUNE_NORM_WEIGHT_MAX</code>). Initial values are heuristic — per mantaLLM&apos;s
+            suggestion we will continue to tighten them as we observe probe outputs across the
+            miner population. Well-behaved distilled models sit 1–3 orders of magnitude below the
+            current caps. If you hit a false DQ, open a thread with your probe numbers from the
+            round card (<code>loss</code>, <code>global_grad_norm</code>, <code>worst_param_type</code>,{" "}
+            <code>worst_norm_weight</code>).
+          </p>
+        </section>
+
+        <section id="local-eval" className="space-y-2 scroll-mt-20">
+          <h2 className="text-base font-semibold text-foreground">Local Eval (Parity Recipe)</h2>
+          <p className="text-xs text-muted-foreground/80">
+            Want to see your KL against the current king before you submit? Run the same prompt
+            sampling + KL math the validator does, locally, against any HF model.
+          </p>
+          <div className="rounded-lg border border-border/30 p-3 text-xs font-mono space-y-1">
+            <div><span className="text-muted-foreground/60"># start a teacher vLLM on port 8000 (Qwen3.5-35B-A3B)</span></div>
+            <div><span className="text-muted-foreground/60"># then from repo root:</span></div>
+            <div>STUDENT_HF=<span className="text-foreground">your-org/your-model</span> \</div>
+            <div className="pl-4">python scripts/local_eval.py</div>
+          </div>
+          <p className="text-xs text-muted-foreground/70">
+            Env vars: <code>STUDENT_HF</code> (required), <code>BLOCK_NUMBER</code>/<code>BLOCK_HASH</code>{" "}
+            (optional — defaults to the latest public round), <code>KING_KL</code> (optional),{" "}
+            <code>TEACHER_BACKEND</code> (<code>vllm</code> default, or <code>hf</code> for pure
+            transformers), <code>N_PROMPTS</code> (default 300), <code>DEVICE</code>,{" "}
+            <code>DTYPE</code>. Results are written to <code>state/local_eval/</code>.
           </p>
         </section>
 

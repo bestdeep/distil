@@ -253,8 +253,8 @@ def clean_model_cache(name, teacher_name=None):
 
 
 FINETUNE_PROBE_TEXT = "The capital of France is Paris. The capital of Germany is Berlin."
-FINETUNE_GRAD_NORM_MAX = float(os.environ.get("FINETUNE_GRAD_NORM_MAX", "1000"))
-FINETUNE_NORM_WEIGHT_MAX = float(os.environ.get("FINETUNE_NORM_WEIGHT_MAX", "100"))
+FINETUNE_GRAD_NORM_MAX = float(os.environ.get("FINETUNE_GRAD_NORM_MAX", "500"))
+FINETUNE_NORM_WEIGHT_MAX = float(os.environ.get("FINETUNE_NORM_WEIGHT_MAX", "30"))
 
 
 def _classify_probe_param(name: str) -> str:

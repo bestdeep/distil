@@ -8,9 +8,12 @@ interface BenchmarkPayload {
   model: string;
   kl?: number | null;
   is_baseline?: boolean;
+  is_king?: boolean;
   completed?: boolean;
   benchmarks: Record<string, number | null>;
   timestamp?: string | number;
+  fetched_at?: number;
+  limit?: number;
 }
 
 interface BenchmarksResponse {
@@ -33,6 +36,18 @@ const TASK_LABELS: Record<string, string> = {
 function formatScore(score: number | null | undefined): string {
   if (score == null || !Number.isFinite(score)) return "—";
   return (score * 100).toFixed(1);
+}
+
+function formatRelative(epochSec: number): string {
+  const deltaMs = Date.now() - epochSec * 1000;
+  const s = Math.max(0, Math.floor(deltaMs / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  return `${d}d ago`;
 }
 
 function getDelta(score: number | null | undefined, baseline: number | null | undefined) {
@@ -109,6 +124,14 @@ export function BenchmarksTab() {
         <h2 className="text-xl font-semibold tracking-tight text-foreground">Benchmarks</h2>
         <p className="text-xs text-muted-foreground mt-1">
           Current king evaluated with lm-eval-harness against {baseline?.model ?? "a teacher-size baseline"}.
+          {latest.fetched_at && (
+            <span className="ml-1 text-muted-foreground/50">
+              · refreshed {formatRelative(latest.fetched_at)}
+            </span>
+          )}
+          {latest.limit && (
+            <span className="ml-1 text-muted-foreground/50">· {latest.limit} samples/task</span>
+          )}
         </p>
       </div>
 

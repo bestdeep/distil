@@ -67,9 +67,38 @@ def select_challengers(valid_models, state: ValidatorState, king_uid, king_kl, e
 
 
 def add_top5_contenders(challengers, valid_models, state: ValidatorState, king_uid):
+    """Always include top contenders in every eval round.
+
+    Uses the latest round's H2H leaderboard (``top4_leaderboard.contenders``)
+    first — these were ranked on the same prompt set as the current king and
+    are the only fair cross-round comparison. Falls back to ``state.scores``
+    only when no H2H leaderboard exists yet (e.g. fresh state after migration).
+
+    The previous behaviour ranked purely by ``state.scores`` which mixes KL
+    from different prompt sets and silently bumped genuine top-4 contenders
+    off the round when newer challengers happened to have better-looking
+    cross-round raw KL. Reported by Topaz (2026-04-17).
+    """
     if king_uid is None:
         return
     contenders_added = 0
+
+    lb_contenders = state.top4_leaderboard.get("contenders", []) or []
+    if lb_contenders:
+        for entry in lb_contenders:
+            uid = entry.get("uid")
+            if uid is None or uid == king_uid or uid in challengers:
+                continue
+            if uid in valid_models:
+                challengers[uid] = valid_models[uid]
+                contenders_added += 1
+        if contenders_added:
+            logger.info(
+                f"🏆 Added {contenders_added} top-{TOP_N_ALWAYS_INCLUDE} contender(s) "
+                f"to eval (from H2H leaderboard)"
+            )
+        return
+
     scored = []
     for uid, info in valid_models.items():
         if uid == king_uid or uid in challengers:
@@ -83,7 +112,10 @@ def add_top5_contenders(challengers, valid_models, state: ValidatorState, king_u
         challengers[uid] = valid_models[uid]
         contenders_added += 1
     if contenders_added:
-        logger.info(f"🏆 Added {contenders_added} top-{TOP_N_ALWAYS_INCLUDE} contender(s) to eval")
+        logger.info(
+            f"🏆 Added {contenders_added} top-{TOP_N_ALWAYS_INCLUDE} contender(s) "
+            f"to eval (from global scores — fallback)"
+        )
 
 
 def cap_challengers(challengers, state: ValidatorState, king_uid):

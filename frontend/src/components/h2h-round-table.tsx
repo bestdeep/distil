@@ -252,6 +252,21 @@ function RoundRow({ round, defaultOpen, isLatest }: { round: H2hLatestResponse; 
                       {vsKing || "—"}
                     </span>
                   )}
+                  {!isKing && tt && (tt.p != null || tt.n != null) && (
+                    <div className="text-[9px] text-muted-foreground/40 mt-0.5">
+                      {tt.p != null && (
+                        <span className={
+                          tt.p < 0.03
+                            ? "text-emerald-400/80"
+                            : tt.p < 0.1
+                            ? "text-amber-400/70"
+                            : "text-muted-foreground/40"
+                        }>p={tt.p < 1e-3 ? tt.p.toExponential(1) : tt.p.toFixed(3)}</span>
+                      )}
+                      {tt.t != null && <span className="ml-1">t={tt.t.toFixed(2)}</span>}
+                      {tt.n != null && <span className="ml-1 text-muted-foreground/30">n={tt.n}</span>}
+                    </div>
+                  )}
                 </div>
               </div>
             );
