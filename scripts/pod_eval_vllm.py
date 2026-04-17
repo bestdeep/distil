@@ -55,6 +55,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -425,11 +426,17 @@ THINK_PROBE_PROMPTS = [
     "Say the word: done",
     "Reply with just the number 7.",
     "Output only: OK",
+    "Greet me.",
+    "Which is larger: 2 or 3? Answer with just the digit.",
+    "Complete the word: appl_",
+    "What color is the sky usually? One word.",
+    "Name a primary color. One word.",
 ]
 THINK_PROBE_MAX_TOKENS = int(os.environ.get("THINK_PROBE_MAX_TOKENS", "1024"))
 THINK_PROBE_TERMINATE_THRESHOLD = float(os.environ.get("THINK_PROBE_TERMINATE_THRESHOLD", "0.66"))
 THINK_PROBE_DEGEN_SIGMA = float(os.environ.get("THINK_PROBE_DEGEN_SIGMA", "4.0"))
 THINK_PROBE_GZIP_FLOOR = float(os.environ.get("THINK_PROBE_GZIP_FLOOR", "0.25"))
+THINK_PROBE_SELFBLEU_MAX = float(os.environ.get("THINK_PROBE_SELFBLEU_MAX", "0.85"))
 _CHAT_PROBE_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 _CHAT_PROBE_THINK_TRAIL = re.compile(r"^.*?</think>\s*", re.DOTALL)
 _CHAT_PROBE_NARRATIVE = re.compile(r"^\s*Thinking Process:.*?(?=\n\n[A-Z0-9]|\Z)", re.DOTALL)
@@ -650,6 +657,42 @@ def _robust_zscore(x: float, values: list[float]) -> float:
     return 0.6745 * (x - med) / mad
 
 
+def _self_bleu_pairwise(texts: list[str], n: int = 4) -> float:
+    """Cross-rollout 4-gram overlap: 1.0 = identical, 0.0 = disjoint.
+
+    Catches "student memorized one answer and emits it regardless of prompt"
+    — a real attack that a per-sample gzip/distinct-k test cannot see,
+    because each individual answer looks fine in isolation. Pimentel et al.
+    *Standardizing the Measurement of Text Diversity* (arXiv:2403.00553,
+    IJCNLP 2025 demo) recommends Self-BLEU alongside compression for exactly
+    this reason.
+
+    Pairwise Jaccard-on-4-grams rather than corpus BLEU — 20× faster and
+    equally informative at this scale. Returns mean over all pairs.
+    """
+    if len(texts) < 2:
+        return 0.0
+    grams = []
+    for t in texts:
+        toks = t.split()
+        if len(toks) < n:
+            grams.append(set())
+            continue
+        grams.append({tuple(toks[i:i + n]) for i in range(len(toks) - n + 1)})
+    pairs = 0
+    s = 0.0
+    for i in range(len(grams)):
+        for j in range(i + 1, len(grams)):
+            if not grams[i] or not grams[j]:
+                continue
+            inter = len(grams[i] & grams[j])
+            union = len(grams[i] | grams[j])
+            if union > 0:
+                s += inter / union
+                pairs += 1
+    return s / pairs if pairs else 0.0
+
+
 def thinking_collapse_probe(model, tokenizer, device="cuda", teacher_samples=None):
     """Degeneracy probe for off-policy CoT collapse — threshold-free design.
 
@@ -740,6 +783,7 @@ def thinking_collapse_probe(model, tokenizer, device="cuda", teacher_samples=Non
                         "distinct_4": round(m.get("distinct_4", 0.0), 3),
                         "top_6gram_rate": round(m.get("top_kgram_rate", 0.0), 3),
                         "tail": raw_text[-200:],
+                        "_full_text": raw_text,
                     })
                     stats["prompts_tested"] += 1
                 except Exception as e:
@@ -753,6 +797,17 @@ def thinking_collapse_probe(model, tokenizer, device="cuda", teacher_samples=Non
         if teacher_samples:
             stats["teacher_metrics"] = [_degeneracy_metrics(t) for t in teacher_samples]
         stats["samples"] = samples
+
+        student_texts = [s.get("_full_text", "") for s in samples if s.get("_full_text")]
+        self_bleu = _self_bleu_pairwise(student_texts, n=4) if len(student_texts) >= 2 else 0.0
+        stats["self_bleu_across_prompts"] = round(self_bleu, 3)
+        for s in samples:
+            s.pop("_full_text", None)
+
+        teacher_self_bleu = 0.0
+        if teacher_samples and len(teacher_samples) >= 2:
+            teacher_self_bleu = _self_bleu_pairwise(teacher_samples, n=4)
+        stats["teacher_self_bleu"] = round(teacher_self_bleu, 3)
 
         degenerate = 0
         for m in student_m:
@@ -771,11 +826,21 @@ def thinking_collapse_probe(model, tokenizer, device="cuda", teacher_samples=Non
         term_ok = terminated >= THINK_PROBE_TERMINATE_THRESHOLD * n - 1e-9
         degen_frac = degenerate / n
         degen_ok = degen_frac < 0.34
-        if not term_ok or not degen_ok:
+        sb_threshold = max(THINK_PROBE_SELFBLEU_MAX, teacher_self_bleu + 0.10)
+        self_bleu_ok = self_bleu < sb_threshold
+        if not term_ok or not degen_ok or not self_bleu_ok:
             stats["pass"] = False
+            reasons = []
+            if not term_ok:
+                reasons.append(f"terminated={terminated}/{n}")
+            if not degen_ok:
+                reasons.append(f"degenerate={degenerate}/{n}")
+            if not self_bleu_ok:
+                reasons.append(
+                    f"self_bleu={self_bleu:.2f}>{sb_threshold:.2f}"
+                )
             stats["reason"] = (
-                f"thinking_collapse:terminated={terminated}/{n} "
-                f"degenerate={degenerate}/{n} "
+                f"thinking_collapse:{','.join(reasons)} "
                 f"mean_gen={stats['mean_gen_tokens']:.0f}"
             )
 
