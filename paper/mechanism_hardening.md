@@ -50,7 +50,7 @@ next quarter; **P3** = spec only, implementation-deferred.
 | A1 | On-policy reverse-KL (student rollout + teacher NLL) | Teacher-forced hacking (Tiapkin) | P1 *(prototype)* | Thinking Machines blog 10/2025 |
 | A2 | Autoregressive degeneracy gate (gzip + spectral + Self-BLEU) | CoT collapse | P0 *(shipped)* | Pimentel 2403.00553; Holtzman 1904.09751 |
 | A3 | Length penalty on rollouts | Infinite-loop emission-farming | P0 *(shipped, shadow)* | Kimi k1.5 2501.12599 |
-| A4 | Verifiable outcome rewards (math/format/factoid) | "Miracle-step" overfitting | P0 *(mini, shipped shadow)* | Tülu 3 2411.15124, Rubric Rewards 2510.07774 |
+| A4 | Verifiable outcome rewards (math/format/factoid) | "Miracle-step" overfitting | P0 *(v2 shipped shadow: rotating per-block + procedural math)* | Tülu 3 2411.15124, Rubric Rewards 2510.07774 |
 | A5 | Teacher ensemble worst-case (Qwen + DeepSeek + Llama) | Teacher-specific Goodhart | P1 | Coste 2406.01013 |
 | A6 | Weight-fingerprint dedup at registration | Copy-miner / fork-king | P1 | AWM 2510.06738, REEF, DuFFin |
 | A7 | Rotating prompt pool + reusable-holdout DP noise | Prompt memorization / reverse-engineering | P2 | LiveBench 2406.19314, Dwork 2015 |
@@ -205,6 +205,36 @@ Two critical caveats from the 2025 literature:
   PRMBench (arXiv:2501.03124, 2025) show current open PRMs are brittle
   and fail to generalize beyond GSM8K/MATH. Outcome verification >
   process reward at our scale.
+
+### What shipped (April 2026, v2)
+
+Implementation in `scripts/pod_eval_vllm.py`:
+
+- **Static pool** of ~50 verifiable prompts spanning: capitals/geography,
+  basic chemistry, factoids, prime checks, divisibility, IFEval-style
+  format compliance (all-caps regex, comma-separated lists, exact word
+  count, single-word rhyme, lowercase constraint), multi-choice (A/B/C/D),
+  and word/letter manipulation. Per round we deterministically sample
+  `CAPABILITY_PROBE_N=24` of these via `random.Random(block_seed)`.
+- **Procedurally generated math** (`CAPABILITY_PROBE_N_PROC_MATH=12`):
+  add/sub/mul/div/mod with operands drawn from the same seeded RNG.
+  *Fresh every round*, so memorization is impossible.
+- **Multi-kind verifier** (`_capability_score_one`): exact int / yes-no /
+  one-letter-MC / word / `word_alt` synonym set / regex / word-count /
+  rhyme-suffix / phrase regex. Each kind has a tolerant extractor
+  (`_extract_capability_answer`) that strips `<think>` blocks and
+  markdown wrappers before scoring, so partial credit goes to models
+  that *could* answer but haven't been RLHF'd for format.
+- **Teacher normalization**: `composite._axis_capability` divides
+  student `pass_frac` by `teacher_pass_frac` (computed by
+  `prepare_teacher_probe_refs_vllm` on the *same* sampled set), so the
+  axis is calibrated to teacher difficulty. Cache invalidates when
+  `block_seed` changes (`teacher_capability_block_seed` field in the
+  on-disk torch cache).
+
+Still to do (deferred to private-pool axis A7 + A1 on-policy roll-outs):
+real GSM8K/MATH-mini sourced from a held-out validator-only set, code
+sandboxing for HumanEval, multi-verifier 2-of-3 agreement.
 
 ---
 
