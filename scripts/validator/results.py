@@ -3,6 +3,7 @@ import math
 
 from eval.scoring import disqualify, is_disqualified, record_failure, reset_failures
 from eval.state import ValidatorState, log_event
+from scripts.validator.composite import annotate_h2h_with_composite, compute_composite
 from scripts.validator.config import ACTIVATION_COPY_THRESHOLD, EPSILON, MAX_KL_THRESHOLD, PAIRED_TEST_ALPHA
 from scripts.validator.precheck import check_activation_fingerprint
 
@@ -53,7 +54,7 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
             continue
         if "error" in student_result:
             logger.warning(f"UID {uid} ({model_name}): eval error — {student_result['error']}")
-            record_failure(uid, state.failures)
+            record_failure(uid, state.failures, state.failure_models, model_name)
             continue
         if student_result.get("functional_copy"):
             copy_of = student_result.get("copy_of", "unknown")
@@ -129,7 +130,7 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
             continue
         if kl == float("inf") or kl < 0:
             logger.warning(f"UID {uid}: invalid KL={kl}")
-            record_failure(uid, state.failures)
+            record_failure(uid, state.failures, state.failure_models, model_name)
             continue
         this_round_uids.add(uid)
         if uid == king_uid:
@@ -269,6 +270,21 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
         else:
             winner_uid, winner_kl = best_uid, best_kl
     h2h_results = _build_h2h_results(results, models_to_eval, king_uid, king_h2h_kl, king_per_prompt, uid_to_model)
+    try:
+        annotate_h2h_with_composite(h2h_results, king_h2h_kl, results.get("students", {}))
+        for entry in h2h_results:
+            comp = entry.get("composite") or {}
+            worst = comp.get("worst")
+            if worst is not None:
+                axes = comp.get("axes", {})
+                axes_str = " ".join(f"{k}={v:.2f}" if v is not None else f"{k}=–"
+                                    for k, v in axes.items())
+                logger.info(
+                    f"  composite[shadow] UID {entry.get('uid')}: "
+                    f"worst={worst:.3f} weighted={comp.get('weighted')} [{axes_str}]"
+                )
+    except Exception as exc:
+        logger.warning(f"composite annotation failed: {exc}")
     logger.info(f"H2H ROUND RESULTS (block {current_block}):")
     for rank, (uid, kl) in enumerate(h2h_candidates, 1):
         marker = " ← WINNER" if uid == winner_uid else ""
