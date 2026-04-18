@@ -438,20 +438,130 @@ THINK_PROBE_DEGEN_SIGMA = float(os.environ.get("THINK_PROBE_DEGEN_SIGMA", "4.0")
 THINK_PROBE_GZIP_FLOOR = float(os.environ.get("THINK_PROBE_GZIP_FLOOR", "0.25"))
 THINK_PROBE_SELFBLEU_MAX = float(os.environ.get("THINK_PROBE_SELFBLEU_MAX", "0.85"))
 
-CAPABILITY_PROBE_PROMPTS = [
-    {"q": "What is 13 + 29? Answer with only the number.", "a": "42", "kind": "int"},
-    {"q": "What is 7 * 8? Answer with only the number.", "a": "56", "kind": "int"},
-    {"q": "What is 100 - 37? Answer with only the number.", "a": "63", "kind": "int"},
-    {"q": "What is 144 / 12? Answer with only the number.", "a": "12", "kind": "int"},
+_CAPABILITY_STATIC_POOL = [
+    {"q": "What is the capital of France? One word.", "a": "paris", "kind": "word"},
+    {"q": "What is the capital of Japan? One word.", "a": "tokyo", "kind": "word"},
+    {"q": "What is the capital of Italy? One word.", "a": "rome", "kind": "word"},
+    {"q": "What is the capital of Egypt? One word.", "a": "cairo", "kind": "word"},
+    {"q": "What is the capital of Brazil? One word.", "a": "brasilia", "kind": "word_alt", "alts": ["brasília"]},
+    {"q": "What is the capital of Australia? One word.", "a": "canberra", "kind": "word"},
+    {"q": "What is the capital of Canada? One word.", "a": "ottawa", "kind": "word"},
+    {"q": "What is the capital of Kenya? One word.", "a": "nairobi", "kind": "word"},
+    {"q": "Which continent is Egypt on? One word.", "a": "africa", "kind": "word"},
+    {"q": "Which planet is closest to the sun? One word.", "a": "mercury", "kind": "word"},
+    {"q": "Which planet is the largest in our solar system? One word.", "a": "jupiter", "kind": "word"},
+    {"q": "Which planet is known for its rings? One word.", "a": "saturn", "kind": "word"},
+    {"q": "What color do you get by mixing red and blue? One word.", "a": "purple", "kind": "word_alt", "alts": ["violet", "magenta"]},
+    {"q": "What color do you get by mixing blue and yellow? One word.", "a": "green", "kind": "word"},
+    {"q": "What color do you get by mixing red and yellow? One word.", "a": "orange", "kind": "word"},
+    {"q": "Which month has exactly 28 or 29 days? One word.", "a": "february", "kind": "word"},
+    {"q": "How many days are in a leap year? Answer with only the number.", "a": "366", "kind": "int"},
+    {"q": "How many sides does a hexagon have? Answer with only the number.", "a": "6", "kind": "int"},
+    {"q": "How many sides does a pentagon have? Answer with only the number.", "a": "5", "kind": "int"},
+    {"q": "How many sides does an octagon have? Answer with only the number.", "a": "8", "kind": "int"},
+    {"q": "How many hours are in 3 days? Answer with only the number.", "a": "72", "kind": "int"},
+    {"q": "How many minutes are in 4 hours? Answer with only the number.", "a": "240", "kind": "int"},
+    {"q": "How many centimeters are in 2 meters? Answer with only the number.", "a": "200", "kind": "int"},
     {"q": "Is 17 a prime number? Answer yes or no.", "a": "yes", "kind": "yesno"},
     {"q": "Is 21 a prime number? Answer yes or no.", "a": "no", "kind": "yesno"},
-    {"q": "What is the capital of France? One word.", "a": "paris", "kind": "word"},
-    {"q": "What color do you get by mixing red and blue? One word.", "a": "purple", "kind": "word_alt", "alts": ["violet", "magenta"]},
-    {"q": "Which month has exactly 28 or 29 days? One word.", "a": "february", "kind": "word"},
-    {"q": "How many sides does a hexagon have? Answer with only the number.", "a": "6", "kind": "int"},
+    {"q": "Is 29 a prime number? Answer yes or no.", "a": "yes", "kind": "yesno"},
+    {"q": "Is 91 a prime number? Answer yes or no.", "a": "no", "kind": "yesno"},
+    {"q": "Is 100 divisible by 4? Answer yes or no.", "a": "yes", "kind": "yesno"},
+    {"q": "Is 50 divisible by 7? Answer yes or no.", "a": "no", "kind": "yesno"},
+    {"q": "Is water a liquid at 20 degrees Celsius? Answer yes or no.", "a": "yes", "kind": "yesno"},
+    {"q": "Does the sun rise in the west? Answer yes or no.", "a": "no", "kind": "yesno"},
+    {"q": "Is a whale a mammal? Answer yes or no.", "a": "yes", "kind": "yesno"},
+    {"q": "Is a spider an insect? Answer yes or no.", "a": "no", "kind": "yesno"},
+    {"q": "What is the largest ocean on Earth? One word.", "a": "pacific", "kind": "word"},
+    {"q": "What gas do plants primarily absorb from the air? Two words.", "a": "carbon dioxide", "kind": "phrase", "accept_re": r"\bcarbon\s+dioxide\b|\bco2\b"},
+    {"q": "What is the chemical symbol for gold? One word.", "a": "au", "kind": "word"},
+    {"q": "What is the chemical symbol for water? One word.", "a": "h2o", "kind": "word"},
+    {"q": "What is the name of the closest star to Earth? One word.", "a": "sun", "kind": "word"},
+    {"q": "What is the freezing point of water in Celsius? Answer with only the number.", "a": "0", "kind": "int"},
+    {"q": "What is the boiling point of water in Celsius at sea level? Answer with only the number.", "a": "100", "kind": "int"},
+    # Instruction-following / format compliance (IFEval-style)
+    {"q": "Reply with exactly the single word 'OK'.", "a": "ok", "kind": "word"},
+    {"q": "Answer only 'YES' in all capital letters.", "a": "YES", "kind": "format_re", "accept_re": r"^YES\b"},
+    {"q": "List three primary colors separated by commas, nothing else.", "kind": "format_re",
+     "accept_re": r"^\s*(red|blue|yellow)\s*,\s*(red|blue|yellow)\s*,\s*(red|blue|yellow)\s*\.?\s*$"},
+    {"q": "Answer with exactly three words (no more, no less) describing a cat.",
+     "kind": "word_count", "count": 3},
+    {"q": "Respond with a single lowercase word that rhymes with 'cat'.",
+     "kind": "rhyme", "rhyme": "at", "lowercase": True},
+    {"q": "Write the word 'hello' reversed (letter-by-letter). One word only.",
+     "a": "olleh", "kind": "word"},
+    {"q": "How many letters are in the word 'banana'? Answer with only the number.", "a": "6", "kind": "int"},
+    {"q": "How many vowels are in the word 'education'? Answer with only the number.", "a": "5", "kind": "int"},
+    # Multi-choice (answer letter only)
+    {"q": "Which one is a mammal? A) shark B) eagle C) dolphin D) lizard. Respond with only the letter.",
+     "a": "c", "kind": "mc"},
+    {"q": "Which one is a noble gas? A) oxygen B) helium C) nitrogen D) hydrogen. Respond with only the letter.",
+     "a": "b", "kind": "mc"},
+    {"q": "Which one is a prime number? A) 15 B) 21 C) 25 D) 23. Respond with only the letter.",
+     "a": "d", "kind": "mc"},
+    {"q": "Which one was a Roman emperor? A) Napoleon B) Einstein C) Augustus D) Shakespeare. Respond with only the letter.",
+     "a": "c", "kind": "mc"},
 ]
+
 CAPABILITY_PROBE_MAX_TOKENS = int(os.environ.get("CAPABILITY_PROBE_MAX_TOKENS", "48"))
+CAPABILITY_PROBE_N = int(os.environ.get("CAPABILITY_PROBE_N", "24"))
+CAPABILITY_PROBE_N_PROC_MATH = int(os.environ.get("CAPABILITY_PROBE_N_PROC_MATH", "12"))
 LENGTH_PENALTY_RATIO = float(os.environ.get("LENGTH_PENALTY_RATIO", "2.0"))
+
+
+def _procedural_math_prompts(rng, n):
+    out = []
+    for _ in range(n):
+        kind = rng.choice(["add", "sub", "mul", "div", "mod"])
+        if kind == "add":
+            a, b = rng.randint(17, 499), rng.randint(17, 499)
+            out.append({"q": f"What is {a} + {b}? Answer with only the number.", "a": str(a + b), "kind": "int"})
+        elif kind == "sub":
+            a, b = rng.randint(100, 900), rng.randint(10, 99)
+            out.append({"q": f"What is {a} - {b}? Answer with only the number.", "a": str(a - b), "kind": "int"})
+        elif kind == "mul":
+            a, b = rng.randint(2, 15), rng.randint(2, 15)
+            out.append({"q": f"What is {a} * {b}? Answer with only the number.", "a": str(a * b), "kind": "int"})
+        elif kind == "div":
+            b = rng.randint(2, 12)
+            q = rng.randint(2, 25)
+            a = b * q
+            out.append({"q": f"What is {a} / {b}? Answer with only the number.", "a": str(q), "kind": "int"})
+        else:
+            a, b = rng.randint(20, 200), rng.randint(3, 9)
+            out.append({"q": f"What is {a} mod {b}? Answer with only the number.", "a": str(a % b), "kind": "int"})
+    return out
+
+
+def build_capability_prompts(block_seed=None):
+    """Return the per-round capability prompt list (static sample + procedural math).
+
+    Determinism: seeded by ``block_seed`` so all validators compute the same
+    prompts for a given round, yet the set rotates every round preventing
+    memorization. If ``block_seed`` is None (local dev), fall back to a fixed
+    seed for repeatability.
+    """
+    import random
+    rng = random.Random(int(block_seed) if block_seed is not None else 20260418)
+    pool = list(_CAPABILITY_STATIC_POOL)
+    rng.shuffle(pool)
+    k = min(CAPABILITY_PROBE_N, len(pool))
+    sampled = pool[:k]
+    sampled.extend(_procedural_math_prompts(rng, CAPABILITY_PROBE_N_PROC_MATH))
+    return sampled
+
+
+_CAPABILITY_BLOCK_SEED = None
+CAPABILITY_PROBE_PROMPTS = build_capability_prompts(None)
+
+
+def set_capability_block_seed(block_seed):
+    """Regenerate CAPABILITY_PROBE_PROMPTS deterministically for this round."""
+    global _CAPABILITY_BLOCK_SEED, CAPABILITY_PROBE_PROMPTS
+    if block_seed is None or block_seed == _CAPABILITY_BLOCK_SEED:
+        return
+    _CAPABILITY_BLOCK_SEED = block_seed
+    CAPABILITY_PROBE_PROMPTS = build_capability_prompts(block_seed)
 
 _CHAT_PROBE_THINK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 _CHAT_PROBE_THINK_TRAIL = re.compile(r"^.*?</think>\s*", re.DOTALL)
@@ -710,37 +820,65 @@ def _self_bleu_pairwise(texts: list[str], n: int = 4) -> float:
 
 
 def _extract_capability_answer(text: str, kind: str) -> str:
-    """Pull the first answer token from a model generation.
+    """Pull the answer token(s) from a model generation.
 
     We aim for extraction tolerance: students sometimes emit <think> blocks,
     leading newlines, markdown, or verbose wrappers. Strip and search rather
-    than demand exact formatting. The prompt tells them how to answer; the
-    extractor is permissive so partial credit goes to models that *could*
-    answer but haven't been RLHF'd for format compliance.
+    than demand exact formatting. For ``format_re`` and ``word_count`` we keep
+    the full stripped text — the verifier handles whitespace/punctuation.
     """
-    t = _strip_thinking_probe(text or "").strip().lower()
-    if not t:
+    raw = _strip_thinking_probe(text or "").strip()
+    if not raw:
         return ""
     if kind == "int":
-        m = re.search(r"-?\d+", t)
+        m = re.search(r"-?\d+", raw)
         return m.group(0) if m else ""
     if kind == "yesno":
-        if re.search(r"\byes\b", t):
+        low = raw.lower()
+        if re.search(r"\byes\b", low):
             return "yes"
-        if re.search(r"\bno\b", t):
+        if re.search(r"\bno\b", low):
             return "no"
         return ""
-    m = re.search(r"[a-zA-Z]+", t)
+    if kind == "mc":
+        m = re.search(r"\b([A-Da-d])\b", raw)
+        return m.group(1).lower() if m else ""
+    if kind in ("format_re", "word_count", "rhyme", "phrase"):
+        return raw
+    m = re.search(r"[a-zA-Z]+", raw.lower())
     return m.group(0) if m else ""
 
 
 def _capability_score_one(pred: str, item: dict) -> int:
     if not pred:
         return 0
-    if item["kind"] == "word_alt":
+    kind = item.get("kind", "word")
+    if kind == "word_alt":
         accepted = {item["a"].lower()} | {a.lower() for a in item.get("alts", [])}
-        return 1 if pred in accepted else 0
-    return 1 if pred == item["a"].lower() else 0
+        return 1 if pred.lower() in accepted else 0
+    if kind == "phrase":
+        pat = item.get("accept_re")
+        return 1 if pat and re.search(pat, pred.lower()) else 0
+    if kind == "format_re":
+        pat = item.get("accept_re")
+        return 1 if pat and re.search(pat, pred) else 0
+    if kind == "word_count":
+        words = re.findall(r"[A-Za-z][A-Za-z'-]*", pred)
+        return 1 if len(words) == int(item.get("count", 0)) else 0
+    if kind == "rhyme":
+        suffix = item.get("rhyme", "")
+        if not suffix:
+            return 0
+        words = re.findall(r"[A-Za-z]+", pred)
+        if len(words) != 1:
+            return 0
+        w = words[0]
+        if item.get("lowercase") and w != w.lower():
+            return 0
+        return 1 if w.lower().endswith(suffix.lower()) else 0
+    if kind == "mc":
+        return 1 if pred.lower() == item["a"].lower() else 0
+    return 1 if pred.lower() == item["a"].lower() else 0
 
 
 def capability_probe(model, tokenizer, device="cuda"):
@@ -799,7 +937,8 @@ def capability_probe(model, tokenizer, device="cuda"):
                     pred = _extract_capability_answer(raw_text, item["kind"])
                     ok = _capability_score_one(pred, item)
                     out["items"].append({
-                        "q": item["q"], "expected": item["a"],
+                        "q": item["q"], "expected": item.get("a", item.get("kind", "")),
+                        "kind": item["kind"],
                         "pred": pred, "ok": bool(ok),
                         "tail": raw_text[-120:],
                     })
@@ -1922,6 +2061,8 @@ def main():
     parser.add_argument("--max-params-b", type=float, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    set_capability_block_seed(args.block_seed)
+
     # Auto-detect tensor-parallel size when unset (0 = all visible GPUs).
     # Allow override via DISTIL_TP_SIZE env var even when caller forgot the flag.
     env_tp = os.environ.get("DISTIL_TP_SIZE")
@@ -1995,8 +2136,13 @@ def main():
                 prompt_lens = cache["prompt_lens"]
                 if cache.get("teacher_probe_samples"):
                     globals()["_TEACHER_PROBE_SAMPLES"] = cache["teacher_probe_samples"]
-                if cache.get("teacher_capability_refs"):
-                    globals()["_TEACHER_CAPABILITY_REFS"] = cache["teacher_capability_refs"]
+                cached_refs = cache.get("teacher_capability_refs")
+                cached_seed = cache.get("teacher_capability_block_seed")
+                if cached_refs and cached_seed == args.block_seed:
+                    globals()["_TEACHER_CAPABILITY_REFS"] = cached_refs
+                elif cached_refs:
+                    print(f"[eval] Capability refs cache stale "
+                          f"(seed {cached_seed} != {args.block_seed}); will regenerate", flush=True)
                 timings["teacher_cache_load"] = time.time() - t0
                 timings["teacher_generation"] = 0.0
                 timings["teacher_logits_pass"] = 0.0
@@ -2182,6 +2328,7 @@ def main():
                         "sparse": any(_is_sparse_logits(tl) for tl in teacher_logits_list),
                         "teacher_probe_samples": globals().get("_TEACHER_PROBE_SAMPLES", []),
                         "teacher_capability_refs": globals().get("_TEACHER_CAPABILITY_REFS", {}),
+                        "teacher_capability_block_seed": args.block_seed,
                     }, cache_tmp)
                     os.replace(cache_tmp, args.save_teacher_logits)
                     cache_size = os.path.getsize(args.save_teacher_logits) / (1024**2)
@@ -2287,6 +2434,7 @@ def main():
             "sparse": any(_is_sparse_logits(tl) for tl in teacher_logits_list),
             "teacher_probe_samples": globals().get("_TEACHER_PROBE_SAMPLES", []),
             "teacher_capability_refs": globals().get("_TEACHER_CAPABILITY_REFS", {}),
+            "teacher_capability_block_seed": args.block_seed,
         }, cache_path)
 
         del teacher
