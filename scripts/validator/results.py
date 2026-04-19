@@ -40,6 +40,134 @@ def _apply_dp_noise_to_per_prompt(per_prompt, prompt_texts, private_start_idx):
     return out
 
 
+def _pairwise_two_sided_p(a_per_prompt: list[float], b_per_prompt: list[float]) -> tuple[float, float, int]:
+    """Two-sided paired t-test on per-prompt KL between two challengers.
+
+    Returns (mean_delta, p_two_sided, n) where mean_delta = a - b.
+    Used by `_resolve_dethrone_winner` to decide whether two dethroners are
+    statistically distinguishable. We only care about the two-sided p — sign
+    is irrelevant for the equivalence-class check.
+    """
+    n = min(len(a_per_prompt), len(b_per_prompt))
+    if n < 2:
+        return 0.0, 1.0, n
+    deltas = [a_per_prompt[i] - b_per_prompt[i] for i in range(n)]
+    mean_delta = sum(deltas) / n
+    _t, _p_one, p_two = _paired_t_stats(deltas)
+    return mean_delta, p_two, n
+
+
+def _resolve_dethrone_winner(dethroners: list[dict]) -> int:
+    """Pick the king-of-the-round from a list of dethrone-passing challengers.
+
+    Anti-spam logic (apple_2357 attack vector, 2026-04-19):
+      A miner can spam noise-injected near-copies of a competitor's leading
+      model. Each copy passes the activation fingerprint (different weights
+      ⇒ different activations) and each one passes the t-test vs the king
+      (because the original would, and the copies inherit ~the same KL).
+      Old logic: pick lowest KL among them ⇒ random copy wins on noise.
+      New logic: cluster challengers that aren't significantly different from
+      one another (pairwise paired-t-test, p > PAIRED_TEST_ALPHA two-sided)
+      and within the cluster prefer earliest commit_block; ties broken by
+      lowest KL. A genuinely-better outlier still wins because pairwise it
+      will be significantly better than the rest of the cluster.
+
+    Args:
+      dethroners: list of dicts each with keys
+                  uid, kl, per_prompt, commit_block, p_vs_king, n_paired_vs_king
+
+    Returns:
+      uid of the chosen winner.
+    """
+    if not dethroners:
+        raise ValueError("_resolve_dethrone_winner called with empty list")
+    if len(dethroners) == 1:
+        return dethroners[0]["uid"]
+
+    by_uid = {d["uid"]: d for d in dethroners}
+    uids = sorted(by_uid.keys(), key=lambda u: (by_uid[u]["kl"], u))
+    n = len(uids)
+
+    # Build an "indistinguishable" graph: edge a—b iff pairwise paired-t-test
+    # has p_two_sided > PAIRED_TEST_ALPHA. We use the SAME alpha as the king
+    # gate so the rule is consistent: if you can't show one challenger is
+    # significantly better than another, they're tied.
+    same_cluster: dict[int, set] = {u: {u} for u in uids}
+    pairwise_log = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            ui, uj = uids[i], uids[j]
+            mean_d, p_two, n_paired = _pairwise_two_sided_p(
+                by_uid[ui]["per_prompt"], by_uid[uj]["per_prompt"]
+            )
+            pairwise_log.append((ui, uj, mean_d, p_two, n_paired))
+            if n_paired < MIN_PROMPTS_DETHRONE:
+                # Not enough overlap to claim significance ⇒ treat as tied
+                # to avoid promoting a noise-driven separation.
+                same_cluster[ui].add(uj)
+                same_cluster[uj].add(ui)
+                continue
+            if p_two > PAIRED_TEST_ALPHA:
+                same_cluster[ui].add(uj)
+                same_cluster[uj].add(ui)
+
+    # Find the connected component containing the global lowest-KL dethroner
+    # (= old behaviour's pick) — that's the cluster we'll resolve within.
+    seed = uids[0]  # already sorted by KL
+    component: set = set()
+    stack = [seed]
+    while stack:
+        cur = stack.pop()
+        if cur in component:
+            continue
+        component.add(cur)
+        for nbr in same_cluster.get(cur, ()):
+            if nbr not in component:
+                stack.append(nbr)
+
+    # Within the component, prefer earliest commit_block; tiebreak by KL.
+    # commit_block None ⇒ treat as +inf so unknown-block entries lose
+    # (defensive: shouldn't happen in production).
+    def _block(u: int):
+        b = by_uid[u].get("commit_block")
+        return b if b is not None else float("inf")
+
+    component_sorted = sorted(component, key=lambda u: (_block(u), by_uid[u]["kl"], u))
+    winner = component_sorted[0]
+
+    # Comprehensive logging for forensics. This is the most-watched code
+    # path on dethrone rounds — we want a full audit trail in the journal
+    # if anyone questions the choice.
+    if len(dethroners) > 1:
+        logger.info(
+            f"[tiebreak] {len(dethroners)} dethroners passed king t-test; "
+            f"resolving with pairwise + commit_block rule"
+        )
+        for ui, uj, mean_d, p_two, n_paired in pairwise_log:
+            same = uj in same_cluster.get(ui, set())
+            logger.info(
+                f"[tiebreak]   pair {ui} vs {uj}: mean_delta={mean_d:+.6f}, "
+                f"p_two={p_two:.4f}, n={n_paired} → {'TIED' if same else 'DISTINCT'}"
+            )
+        logger.info(
+            f"[tiebreak] cluster around lowest-KL UID {seed}: {sorted(component)}"
+        )
+        for u in component_sorted:
+            d = by_uid[u]
+            marker = " ← WINNER" if u == winner else ""
+            logger.info(
+                f"[tiebreak]   uid={u} block={d.get('commit_block')} "
+                f"kl={d['kl']:.6f} p_vs_king={d.get('p_vs_king')}{marker}"
+            )
+        outliers = sorted(set(uids) - component)
+        if outliers:
+            logger.info(
+                f"[tiebreak] outliers (significantly different from cluster, "
+                f"deferred to next round): {outliers}"
+            )
+    return winner
+
+
 def _paired_t_stats(deltas: list[float]):
     n = len(deltas)
     if n < 2:
@@ -246,6 +374,16 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
     if king_per_prompt is not None and private_start is not None:
         king_per_prompt = _apply_dp_noise_to_per_prompt(king_per_prompt, prompt_texts_for_dp, private_start)
     challengers = {uid: info for uid, info in models_to_eval.items() if uid != king_uid}
+    # Anti-spam tiebreaker (apple_2357 attack vector, 2026-04-19 Discord):
+    # collect EVERY dethrone-passing challenger first, then resolve which one
+    # actually takes the crown in a separate pass that compares them against
+    # each other. If multiple challengers pass and aren't statistically
+    # distinguishable from one another (likely noise-injected copies of the
+    # same model), the earliest commit_block wins. A genuinely-better outlier
+    # still wins on its own merit because pairwise it'll be significantly
+    # better than the rest.
+    dethroners: list[dict] = []  # passed paired-t-test vs king
+    legacy_dethroners: list[dict] = []  # passed legacy epsilon (no per-prompt)
     if king_uid is not None and challengers:
         for uid in challengers:
             uid_str = str(uid)
@@ -265,8 +403,15 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
                     pct_better = (mean_delta / king_new_kl * 100) if king_new_kl > 0 else 0
                     if p_value < PAIRED_TEST_ALPHA and mean_delta > 0:
                         logger.info(f"UID {uid} DETHRONED king UID {king_uid}! p={p_value:.6f}, delta={mean_delta:.6f} ({pct_better:.2f}%), t={t_stat:.3f}, n={len(deltas)}")
-                        if epsilon_dethroned_by is None or challenger_kl < state.scores.get(str(epsilon_dethroned_by), float("inf")):
-                            epsilon_dethroned_by = uid
+                        dethroners.append({
+                            "uid": uid,
+                            "kl": challenger_kl,
+                            "per_prompt": challenger_per_prompt[:n_paired],
+                            "commit_block": (commitments.get(uid, {}) or {}).get("block")
+                                or models_to_eval.get(uid, {}).get("commit_block"),
+                            "p_vs_king": p_value,
+                            "n_paired_vs_king": n_paired,
+                        })
                     elif mean_delta > 0:
                         logger.info(f"UID {uid}: better but not significant (p={p_value:.4f}, delta={mean_delta:.6f}, n={len(deltas)})")
                     else:
@@ -279,8 +424,26 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
                     logger.info(f"UID {uid}: insufficient prompts for legacy epsilon ({challenger_n} < {MIN_PROMPTS_DETHRONE}), KL={challenger_kl:.6f}")
                 elif challenger_kl < epsilon_threshold:
                     logger.info(f"UID {uid} DETHRONED king UID {king_uid}! KL={challenger_kl:.6f} < {epsilon_threshold:.6f} [legacy epsilon, n={challenger_n}]")
-                    if epsilon_dethroned_by is None or challenger_kl < state.scores.get(str(epsilon_dethroned_by), float("inf")):
-                        epsilon_dethroned_by = uid
+                    legacy_dethroners.append({
+                        "uid": uid,
+                        "kl": challenger_kl,
+                        "commit_block": (commitments.get(uid, {}) or {}).get("block")
+                            or models_to_eval.get(uid, {}).get("commit_block"),
+                    })
+
+    # Resolve epsilon_dethroned_by from the collected candidates.
+    # Preferred path: paired-t-test dethroners with per-prompt vectors.
+    # Fallback: legacy-epsilon dethroners (no per-prompt comparison
+    # possible, so we just pick lowest KL like the old behaviour).
+    if dethroners:
+        epsilon_dethroned_by = _resolve_dethrone_winner(dethroners)
+    elif legacy_dethroners:
+        legacy_dethroners.sort(key=lambda d: d["kl"])
+        epsilon_dethroned_by = legacy_dethroners[0]["uid"]
+        logger.info(
+            f"Legacy epsilon path: {len(legacy_dethroners)} dethroner(s) without "
+            f"per-prompt vectors — picking lowest KL UID {epsilon_dethroned_by}"
+        )
     h2h_candidates = []
     all_round_uids = set([king_uid] + list(challengers.keys())) if king_uid is not None else set(challengers.keys())
     for uid in all_round_uids:

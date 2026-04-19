@@ -50,7 +50,7 @@ MIN_MODEL_BYTES = 500_000_000     # 500MB minimum
 MAX_STUDENT_VRAM_GB = 20.0        # Real 4B ≈ 8-10GB
 MIN_TOKENS_PER_SEC = 50           # Real 4B on B200 does 100+ tok/s
 KL_FRAUD_THRESHOLD = 1e-6         # KL ≤ this = identical to teacher = fraud
-FINGERPRINT_COSINE_THRESHOLD = 0.9999  # functional copy detection
+FINGERPRINT_COSINE_THRESHOLD = 0.99999  # functional copy detection (bumped 2026-04-19, see commit history)
 
 
 def banner(text: str, char: str = "═", width: int = 60):

@@ -22,7 +22,7 @@
     "topNAlwaysInclude": 5,
     "referenceModel": "Qwen/Qwen3.5-4B",
     "referenceUid": -1,
-    "activationCopyThreshold": 0.9999,
+    "activationCopyThreshold": 0.99999,
     "distilRoleId": "1482026585358991571"
   },
   "chat": {
