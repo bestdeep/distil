@@ -37,7 +37,7 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
         eval_order.append({"uid": uid, "model": models_to_eval[uid]["model"], "role": "challenger"})
     progress = {
         "active": True,
-        "phase": "teacher_loading",
+        "phase": "pod_bootstrap",
         "models": {str(uid): info["model"] for uid, info in models_to_eval.items()},
         "eval_order": eval_order,
         "students_total": len(models_to_eval),
@@ -167,15 +167,57 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
     gpu_log_path = state.state_dir / "gpu_eval.log"
     gpu_log_path.write_text("")
 
+    # Progress-poll diagnostics. A zero-byte or stale eval_progress.json was
+    # swallowed silently here for months, and the only user-visible symptom
+    # was the dashboard stuck on "Loading teacher model…" for an entire
+    # round. Log the first failure (per state) so operators can tell the
+    # difference between "pod hasn't written yet" (expected early) vs
+    # "pod writer is broken" (which is what the 2026-04-20 round looked
+    # like — see scripts/pod_eval_vllm.py::_atomic_json_write for the
+    # matching writer-side fix).
+    _poll_last_err: dict = {"kind": None, "at": 0.0}
+
+    def _poll_log_err(kind: str, msg: str):
+        now = time.time()
+        if _poll_last_err["kind"] == kind and (now - _poll_last_err["at"]) < 300:
+            return
+        _poll_last_err["kind"] = kind
+        _poll_last_err["at"] = now
+        logger.info("pod progress poll: %s — %s", kind, msg[:200])
+
     def poll_pod_progress():
         while not poll_stop.is_set():
+            tmp_path = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
                     tmp_path = handle.name
-                pod.download(progress_remote, tmp_path)
+                try:
+                    pod.download(progress_remote, tmp_path)
+                except Exception as exc:
+                    _poll_log_err("download_failed", f"{type(exc).__name__}: {exc}")
+                    raise
+                try:
+                    size = os.path.getsize(tmp_path)
+                except OSError:
+                    size = -1
+                if size <= 0:
+                    _poll_log_err(
+                        "empty_progress_file",
+                        f"remote {progress_remote} downloaded as {size}-byte file — "
+                        f"pod writer may have truncated. Holding last known progress.",
+                    )
+                    raise ValueError(f"zero-byte progress file (size={size})")
                 with open(tmp_path) as handle:
-                    pod_progress = json.load(handle)
-                os.unlink(tmp_path)
+                    try:
+                        pod_progress = json.load(handle)
+                    except json.JSONDecodeError as exc:
+                        with open(tmp_path) as _h:
+                            head = _h.read(200)
+                        _poll_log_err(
+                            "bad_progress_json",
+                            f"parse error: {exc}; file head: {head!r}",
+                        )
+                        raise
                 pod_phase = pod_progress.get("phase", "scoring")
                 progress["phase"] = pod_phase
                 progress["pod"] = pod_progress
@@ -198,8 +240,19 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
                 progress["completed"] = pod_completed
                 progress["students_done"] = len(pod_completed)
                 state.save_progress(progress)
-            except Exception:
-                pass
+                if _poll_last_err["kind"] is not None:
+                    logger.info("pod progress poll: recovered (last error: %s)", _poll_last_err["kind"])
+                    _poll_last_err["kind"] = None
+                    _poll_last_err["at"] = 0.0
+            except Exception as exc:
+                if _poll_last_err["kind"] is None:
+                    _poll_log_err("unclassified", f"{type(exc).__name__}: {exc}")
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
             try:
                 log_result = pod.exec(f"tail -100 {shlex.quote(log_remote)} 2>/dev/null || echo ''", timeout=30)
                 log_text = log_result.get("stdout", "")

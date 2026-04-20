@@ -154,7 +154,7 @@ export function EvalProgressBar() {
   const evalOrder = progress.eval_order ?? [];
 
   const studentsDone = completed.length;
-  const isTeacherPhase = ["teacher_loading", "teacher_generation", "teacher_logits",
+  const isTeacherPhase = ["pod_bootstrap", "teacher_loading", "teacher_generation", "teacher_logits",
     "vllm_starting", "vllm_generating", "gpu_precompute"].includes(progress.phase ?? "");
   const teacherFrac = isTeacherPhase && nPrompts > 0
     ? (progress.teacher_prompts_done ?? 0) / nPrompts
@@ -208,12 +208,13 @@ export function EvalProgressBar() {
       </div>
 
       {/* Teacher phases */}
-      {["teacher_loading", "teacher_generation", "teacher_logits",
+      {["pod_bootstrap", "teacher_loading", "teacher_generation", "teacher_logits",
         "vllm_starting", "vllm_generating", "gpu_precompute"].includes(progress.phase ?? "") && (
         <div className="mb-3 px-2 py-2 rounded-lg bg-purple-400/[0.06] border border-purple-400/20">
           <div className="flex items-center gap-2 mb-1">
             <span className="w-1.5 h-1.5 rounded-full bg-purple-400 animate-pulse" />
             <span className="text-xs font-mono text-purple-200">
+              {progress.phase === "pod_bootstrap" && "Waiting for pod to start eval..."}
               {progress.phase === "teacher_loading" && "Loading teacher model..."}
               {progress.phase === "vllm_starting" && "Starting vLLM server..."}
               {progress.phase === "vllm_generating" && "Generating via vLLM (fast)"}

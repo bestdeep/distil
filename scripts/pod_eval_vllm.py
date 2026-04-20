@@ -2405,22 +2405,55 @@ def hf_batched_forward(teacher, sequences_data, device, batch_size=2, logprobs_k
 # §10  Progress Reporting
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _atomic_json_write(path, data):
+    """Write JSON atomically via tmp+rename, with default=str as a
+    serialization safety net (numpy floats, Path, etc. degrade to their
+    str repr instead of wrecking the file). Partial writes can never
+    leave the destination file truncated at 0 bytes because we only
+    rename after the tmp is fully written.
+
+    On any failure (serialization, disk, etc.) we log a one-line stderr
+    message (rate-limited per process) and return — the previous
+    version of the file stays intact."""
+    import os as _os
+    import sys as _sys
+    tmp = f"{path}.tmp.{_os.getpid()}"
+    try:
+        with open(tmp, "w") as pf:
+            json.dump(data, pf, default=str, allow_nan=True)
+            pf.flush()
+            try:
+                _os.fsync(pf.fileno())
+            except OSError:
+                pass
+        _os.replace(tmp, path)
+    except Exception as exc:
+        try:
+            _os.unlink(tmp)
+        except OSError:
+            pass
+        marker = f"_atomic_json_write_err_{path}"
+        if not globals().get(marker):
+            globals()[marker] = True
+            try:
+                print(f"[progress] {path} write failed: "
+                      f"{type(exc).__name__}: {exc}", file=_sys.stderr, flush=True)
+            except Exception:
+                pass
+
+
 def _write_phase(progress_path, students, phase, teacher_done=None, **extra):
     """Write a phase update to the progress file for the dashboard."""
-    try:
-        data = {
-            "phase": phase,
-            "students": students,
-            "students_total": len(students),
-            "prompts_total": extra.get("prompts_total", 0),
-            "teacher_prompts_done": teacher_done,
-            "completed": extra.get("completed", []),
-            "current": extra.get("current", None),
-        }
-        with open(progress_path, "w") as pf:
-            json.dump(data, pf)
-    except Exception:
-        pass
+    data = {
+        "phase": phase,
+        "students": students,
+        "students_total": len(students),
+        "prompts_total": extra.get("prompts_total", 0),
+        "teacher_prompts_done": teacher_done,
+        "completed": extra.get("completed", []),
+        "current": extra.get("current", None),
+    }
+    _atomic_json_write(progress_path, data)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2949,13 +2982,17 @@ def main():
         "completed": [], "current": None,
     }
     def _write_progress():
-        """Write current live progress to disk for dashboard consumption."""
-        try:
-            with progress_lock:
-                with open(progress_path, "w") as pf:
-                    json.dump(live_progress, pf)
-        except Exception:
-            pass
+        """Write current live progress to disk for dashboard consumption.
+        Uses atomic tmp+rename via _atomic_json_write so partial writes
+        can't leave a zero-byte file that the validator then fails to
+        parse and silently discards."""
+        with progress_lock:
+            snapshot = {k: v for k, v in live_progress.items()}
+            if "current" in snapshot and isinstance(snapshot["current"], dict):
+                snapshot["current"] = dict(snapshot["current"])
+            if "completed" in snapshot and isinstance(snapshot["completed"], list):
+                snapshot["completed"] = list(snapshot["completed"])
+        _atomic_json_write(progress_path, snapshot)
     _write_progress()
 
     # Early stopping state. args.early_stop_min <= 0 disables it outright.
