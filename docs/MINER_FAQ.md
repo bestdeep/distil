@@ -83,7 +83,7 @@ Starting in the validator commit cycle following the 14-day grace period, the va
 - **Base model:** Start from [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) or a compatible Qwen3.5 architecture
 - **Objective:** Standard knowledge distillation — minimize KL(teacher ‖ student) on the teacher's output distribution
 - **Long completions matter:** Eval uses `max_new_tokens=8192`, so your model needs to handle long generations well
-- **Temperature:** Eval runs greedy (temp=0) — train accordingly
+- **Temperature:** Eval runs vLLM with `temperature=0.7, top_p=0.9` and a per-prompt seed derived from the round's block hash (`seed = block_seed + prompt_idx`). Generation is deterministic per round but varies between rounds. Greedy (temp=0) only applies to local dev runs that don't pass `--block-seed`.
 - **Don't modify the chat template:** It's checked against the reference Qwen3.5 template hash. Injected comments or modifications = DQ
 
 ---
@@ -93,7 +93,7 @@ Starting in the validator commit cycle following the 14-day grace period, the va
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | "Wrong architecture" DQ | `config.json` has `Qwen3_5ForCausalLM` or wrong `model_type` | Change `architectures` to `["Qwen3_5ForConditionalGeneration"]` and `model_type` to `"qwen3_5"` in config.json. No weight changes needed. |
-| "Integrity check failed" | Model weights changed after commitment | You can't re-upload on the same hotkey. Commitments are permanent. Register a new hotkey. |
+| "Integrity check failed" | HF repo deleted, made private, or otherwise unreachable since the validator first hashed it | Make the repo public and re-upload the same weights — the integrity DQ clears next epoch when the validator can re-verify. The on-chain commitment doesn't move; only the HF repo state matters. (Permanent DQs from `copy`, `anti_finetune`, or `arch` cannot be cleared this way — those require a new hotkey.) |
 | "Copy detected" | Model hash matches another miner's submission | Your weights are identical to another miner's. Train your own model. |
 | "Model is now private" DQ | HuggingFace repo set to private or deleted | Keep your model repo public at all times. |
 | "Vocab size mismatch" | Modified tokenizer | Use the exact same tokenizer as the teacher (Qwen3.5-35B-A3B). |

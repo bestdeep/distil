@@ -61,7 +61,7 @@ Disqualification reasons are shown on the dashboard and available via the API.
 ### Anti-Gaming
 
 - **SHA256 hash duplicate detection**: Model weight hashes tracked forever; copies blacklisted for that commitment
-- **Logit fingerprinting**: Even if hashes differ, models with identical KL distributions on the first 2 prompts are flagged as functional copies (cosine similarity > 0.9999 on per-position KL vectors)
+- **Logit fingerprinting**: Even if hashes differ, models with identical KL distributions on the first 2 prompts are flagged as functional copies (cosine similarity > 0.99999 on per-position KL vectors)
 - **Cosine similarity tool**: `scripts/cosine_similarity_check.py` provides offline near-copy detection between any two models
 - **Commitment block priority**: Earlier on-chain commitment wins hash ownership
 - **Revision-pinned integrity**: Models checked for new HF commits (git SHA comparison) — any change after commitment = DQ. Much cheaper than re-hashing weights every epoch.
