@@ -2044,8 +2044,19 @@ def stop_vllm_server():
         subprocess.run(["fuser", "-k", f"{VLLM_PORT}/tcp"], capture_output=True, timeout=5)
     except Exception:
         pass
+    # VLLM v1 spawns a child that renames its argv via prctl to just
+    # "VLLM::EngineCore" — cmdline-based pkill -f 'vllm.entrypoints' WILL NOT
+    # match it. If pod_eval exits without the engine being reaped, the engine
+    # survives holding the entire GPU, OOM-ing every future round on this pod.
+    for pattern in ("vllm.entrypoints", "VllmWorker", "VLLM::EngineCore"):
+        try:
+            subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True, timeout=5)
+        except Exception:
+            pass
+    # comm is capped at 15 chars so "VLLM::EngineCore" shows up as
+    # "VLLM::EngineCor" — match that too.
     try:
-        subprocess.run(["pkill", "-9", "-f", "vllm.entrypoints"], capture_output=True, timeout=5)
+        subprocess.run(["pkill", "-9", "-x", "VLLM::EngineCor"], capture_output=True, timeout=5)
     except Exception:
         pass
     my_pid = os.getpid()
@@ -2064,7 +2075,14 @@ def stop_vllm_server():
                     cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="ignore")
                 except Exception:
                     cmdline = ""
-                if any(tag in cmdline for tag in ("vllm.entrypoints", "vllm/engine", "VllmWorker")):
+                try:
+                    comm = Path(f"/proc/{pid}/comm").read_text().strip()
+                except Exception:
+                    comm = ""
+                # Include VLLM::EngineCore(r) — argv-renamed engine holds the
+                # GPU but has no python module path in its cmdline.
+                if any(tag in cmdline for tag in ("vllm.entrypoints", "vllm/engine", "VllmWorker", "VLLM::EngineCore")) \
+                        or comm.startswith("VLLM::EngineCor"):
                     try:
                         os.kill(pid, signal.SIGKILL)
                         killed_any = True
@@ -2405,22 +2423,70 @@ def hf_batched_forward(teacher, sequences_data, device, batch_size=2, logprobs_k
 # §10  Progress Reporting
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _atomic_json_write(path, data):
+    """Write JSON atomically via tmp+rename, with default=str as a
+    serialization safety net (numpy floats, Path, etc. degrade to their
+    str repr instead of wrecking the file). Partial writes can never
+    leave the destination file truncated at 0 bytes because we only
+    rename after the tmp is fully written.
+
+    On any failure (serialization, disk, etc.) we log a one-line stderr
+    message (rate-limited per process) and return — the previous
+    version of the file stays intact."""
+    import os as _os
+    import sys as _sys
+    tmp = f"{path}.tmp.{_os.getpid()}"
+    try:
+        with open(tmp, "w") as pf:
+            json.dump(data, pf, default=str, allow_nan=True)
+            pf.flush()
+            try:
+                _os.fsync(pf.fileno())
+            except OSError:
+                pass
+        _os.replace(tmp, path)
+    except Exception as exc:
+        try:
+            _os.unlink(tmp)
+        except OSError:
+            pass
+        # Key on (path, exception type, str(exception)) so distinct failure
+        # modes all get reported once, but we don't spam the log at 1Hz.
+        err_key = f"_atomic_json_write_err_{path}_{type(exc).__name__}_{str(exc)[:80]}"
+        if not globals().get(err_key):
+            globals()[err_key] = True
+            try:
+                import traceback as _tb
+                print(f"[progress] {path} write failed: "
+                      f"{type(exc).__name__}: {exc}", file=_sys.stderr, flush=True)
+                try:
+                    print(f"[progress]   data keys: {list(data.keys()) if hasattr(data, 'keys') else type(data).__name__}",
+                          file=_sys.stderr, flush=True)
+                    print(f"[progress]   data repr: {repr(data)[:400]}",
+                          file=_sys.stderr, flush=True)
+                except Exception:
+                    pass
+                print("[progress] traceback (most recent call last):",
+                      file=_sys.stderr, flush=True)
+                for frame_line in _tb.format_exception(type(exc), exc, exc.__traceback__)[-6:]:
+                    for ln in frame_line.rstrip().splitlines():
+                        print(f"[progress]   {ln}", file=_sys.stderr, flush=True)
+            except Exception:
+                pass
+
+
 def _write_phase(progress_path, students, phase, teacher_done=None, **extra):
     """Write a phase update to the progress file for the dashboard."""
-    try:
-        data = {
-            "phase": phase,
-            "students": students,
-            "students_total": len(students),
-            "prompts_total": extra.get("prompts_total", 0),
-            "teacher_prompts_done": teacher_done,
-            "completed": extra.get("completed", []),
-            "current": extra.get("current", None),
-        }
-        with open(progress_path, "w") as pf:
-            json.dump(data, pf)
-    except Exception:
-        pass
+    data = {
+        "phase": phase,
+        "students": students,
+        "students_total": len(students),
+        "prompts_total": extra.get("prompts_total", 0),
+        "teacher_prompts_done": teacher_done,
+        "completed": extra.get("completed", []),
+        "current": extra.get("current", None),
+    }
+    _atomic_json_write(progress_path, data)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2949,13 +3015,17 @@ def main():
         "completed": [], "current": None,
     }
     def _write_progress():
-        """Write current live progress to disk for dashboard consumption."""
-        try:
-            with progress_lock:
-                with open(progress_path, "w") as pf:
-                    json.dump(live_progress, pf)
-        except Exception:
-            pass
+        """Write current live progress to disk for dashboard consumption.
+        Uses atomic tmp+rename via _atomic_json_write so partial writes
+        can't leave a zero-byte file that the validator then fails to
+        parse and silently discards."""
+        with progress_lock:
+            snapshot = {k: v for k, v in live_progress.items()}
+            if "current" in snapshot and isinstance(snapshot["current"], dict):
+                snapshot["current"] = dict(snapshot["current"])
+            if "completed" in snapshot and isinstance(snapshot["completed"], list):
+                snapshot["completed"] = list(snapshot["completed"])
+        _atomic_json_write(progress_path, snapshot)
     _write_progress()
 
     # Early stopping state. args.early_stop_min <= 0 disables it outright.

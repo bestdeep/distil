@@ -34,6 +34,7 @@ interface ValidatorStatusProps {
 }
 
 const PHASE_LABELS: Record<string, string> = {
+  pod_bootstrap: "Waiting for pod to start eval",
   teacher_loading: "Loading teacher model",
   vllm_starting: "Starting vLLM server",
   vllm_generating: "vLLM generation (fast)",
@@ -45,6 +46,7 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 const TEACHER_PROGRESS_PHASES = new Set([
+  "pod_bootstrap",
   "teacher_loading",
   "teacher_generation",
   "teacher_logits",

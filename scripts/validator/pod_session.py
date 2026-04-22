@@ -37,7 +37,7 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
         eval_order.append({"uid": uid, "model": models_to_eval[uid]["model"], "role": "challenger"})
     progress = {
         "active": True,
-        "phase": "teacher_loading",
+        "phase": "pod_bootstrap",
         "models": {str(uid): info["model"] for uid, info in models_to_eval.items()},
         "eval_order": eval_order,
         "students_total": len(models_to_eval),
@@ -73,21 +73,49 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
         os.unlink(prompts_file)
     pod.upload(eval_script, remote_eval_script, max_attempts=5)
     try:
+        # VLLM v1 spawns a child process that renames itself to "VLLM::EngineCore"
+        # via prctl(PR_SET_NAME). That process holds the GPU allocation but will
+        # NOT match `pkill -f 'vllm.entrypoints'` because its argv is literally
+        # just "VLLM::EngineCore" — same story for "VllmWorker". If the parent
+        # pod_eval dies without reaping the engine (as happens when the validator
+        # is stopped hard), the EngineCore lives on forever holding ~130 GB of
+        # GPU memory until the next reboot, causing OOMs in future rounds.
+        #
+        # To prevent that, we:
+        #   1. pkill by comm (matches "VLLM::EngineCor", 15-char kernel limit)
+        #   2. pkill by cmdline (belt and braces for any future vllm rename)
+        #   3. fall back on nvidia-smi: if anything is still holding the GPU
+        #      and it looks like a vllm/python worker, nuke it.
         pod.exec(
             "pkill -9 -f pod_eval 2>/dev/null; "
             "pkill -9 -f 'vllm.entrypoints' 2>/dev/null; "
             "pkill -9 -f 'VllmWorker' 2>/dev/null; "
+            "pkill -9 -f 'VLLM::EngineCore' 2>/dev/null; "
+            "pkill -9 -x 'VLLM::EngineCor' 2>/dev/null; "  # match comm (15-char trunc)
             "sleep 2; "
             "for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); do "
+            "  comm=$(cat /proc/$pid/comm 2>/dev/null); "
             "  cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null); "
-            "  case \"$cmd\" in "
-            "    *vllm.entrypoints*|*VllmWorker*|*pod_eval*) kill -9 $pid 2>/dev/null ;; "
+            "  case \"$cmd$comm\" in "
+            "    *vllm.entrypoints*|*VllmWorker*|*pod_eval*|*VLLM::EngineCor*) "
+            "      kill -9 $pid 2>/dev/null ;; "
             "  esac; "
             "done; "
+            "sleep 2; "
+            # Last-resort sweep: if GPU is still non-empty, something slipped
+            # through. Log the survivors so we can improve the patterns above.
+            "survivors=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null); "
+            "if [ -n \"$survivors\" ]; then "
+            "  for pid in $survivors; do "
+            "    echo \"[cleanup] gpu still held by pid=$pid comm=$(cat /proc/$pid/comm 2>/dev/null) cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null | head -c 200)\" >&2; "
+            "    kill -9 $pid 2>/dev/null; "
+            "  done; "
+            "  sleep 2; "
+            "fi; "
             "rm -rf /dev/shm/vllm* 2>/dev/null; "
             "rm -f /home/pod_eval.py /home/prompts.json /home/eval_output.log /home/eval_results.json /home/eval_progress.json /home/teacher_cache.pt 2>/dev/null; "
-            "sleep 3",
-            timeout=30,
+            "sleep 1",
+            timeout=40,
         )
         logger.info("Killed existing eval/vllm processes and removed stale /home files")
     except Exception as exc:
@@ -167,15 +195,57 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
     gpu_log_path = state.state_dir / "gpu_eval.log"
     gpu_log_path.write_text("")
 
+    # Progress-poll diagnostics. A zero-byte or stale eval_progress.json was
+    # swallowed silently here for months, and the only user-visible symptom
+    # was the dashboard stuck on "Loading teacher model…" for an entire
+    # round. Log the first failure (per state) so operators can tell the
+    # difference between "pod hasn't written yet" (expected early) vs
+    # "pod writer is broken" (which is what the 2026-04-20 round looked
+    # like — see scripts/pod_eval_vllm.py::_atomic_json_write for the
+    # matching writer-side fix).
+    _poll_last_err: dict = {"kind": None, "at": 0.0}
+
+    def _poll_log_err(kind: str, msg: str):
+        now = time.time()
+        if _poll_last_err["kind"] == kind and (now - _poll_last_err["at"]) < 300:
+            return
+        _poll_last_err["kind"] = kind
+        _poll_last_err["at"] = now
+        logger.info("pod progress poll: %s — %s", kind, msg[:200])
+
     def poll_pod_progress():
         while not poll_stop.is_set():
+            tmp_path = None
             try:
                 with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as handle:
                     tmp_path = handle.name
-                pod.download(progress_remote, tmp_path)
+                try:
+                    pod.download(progress_remote, tmp_path)
+                except Exception as exc:
+                    _poll_log_err("download_failed", f"{type(exc).__name__}: {exc}")
+                    raise
+                try:
+                    size = os.path.getsize(tmp_path)
+                except OSError:
+                    size = -1
+                if size <= 0:
+                    _poll_log_err(
+                        "empty_progress_file",
+                        f"remote {progress_remote} downloaded as {size}-byte file — "
+                        f"pod writer may have truncated. Holding last known progress.",
+                    )
+                    raise ValueError(f"zero-byte progress file (size={size})")
                 with open(tmp_path) as handle:
-                    pod_progress = json.load(handle)
-                os.unlink(tmp_path)
+                    try:
+                        pod_progress = json.load(handle)
+                    except json.JSONDecodeError as exc:
+                        with open(tmp_path) as _h:
+                            head = _h.read(200)
+                        _poll_log_err(
+                            "bad_progress_json",
+                            f"parse error: {exc}; file head: {head!r}",
+                        )
+                        raise
                 pod_phase = pod_progress.get("phase", "scoring")
                 progress["phase"] = pod_phase
                 progress["pod"] = pod_progress
@@ -198,8 +268,19 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
                 progress["completed"] = pod_completed
                 progress["students_done"] = len(pod_completed)
                 state.save_progress(progress)
-            except Exception:
-                pass
+                if _poll_last_err["kind"] is not None:
+                    logger.info("pod progress poll: recovered (last error: %s)", _poll_last_err["kind"])
+                    _poll_last_err["kind"] = None
+                    _poll_last_err["at"] = 0.0
+            except Exception as exc:
+                if _poll_last_err["kind"] is None:
+                    _poll_log_err("unclassified", f"{type(exc).__name__}: {exc}")
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
             try:
                 log_result = pod.exec(f"tail -100 {shlex.quote(log_remote)} 2>/dev/null || echo ''", timeout=30)
                 log_text = log_result.get("stdout", "")
