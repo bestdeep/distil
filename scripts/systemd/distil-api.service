@@ -8,7 +8,7 @@ Type=simple
 User=distil
 WorkingDirectory=/opt/distil/repo/api
 Environment=HOME=/home/distil
-ExecStart=/opt/distil/venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 3710 --log-level warning --limit-concurrency 100 --timeout-keep-alive 10 --backlog 128 --workers 2
+ExecStart=/opt/distil/venv/bin/python -m uvicorn server:app --host 0.0.0.0 --port 3710 --log-level warning --limit-concurrency 500 --timeout-keep-alive 10 --backlog 128 --workers 1
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
