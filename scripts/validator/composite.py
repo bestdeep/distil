@@ -16,10 +16,10 @@ Status: PRODUCTION — ranking + dethrone veto.
   * 2026-04-19 (commit 8eec9a2): promoted from shadow to production
     ranking key. ``composite.worst`` orders the leaderboard and selects
     the canonical challenger for display.
-  * 2026-04-22 (this commit): ``composite.worst`` is now ALSO a dethrone
-    gate. A challenger that passes the KL paired t-test + 3% epsilon is
-    still blocked from taking the crown if its worst composite axis is
-    below ``COMPOSITE_DETHRONE_FLOOR`` (currently 0.20). See
+  * 2026-04-22: ``composite.worst`` is now ALSO a dethrone gate. A
+    challenger that passes the KL paired t-test + 3% epsilon is still
+    blocked from taking the crown if its worst composite axis is below
+    ``COMPOSITE_DETHRONE_FLOOR`` (currently 0.20). See
     ``scripts/validator/results.py::_composite_dethrone_veto``.
   * Same commit: the ``length`` axis is now always populated even when
     ``THINK_COLLAPSE_PROBE=0``. It falls back to the always-on
@@ -32,18 +32,29 @@ Status: PRODUCTION — ranking + dethrone veto.
     per round but excluded from ``worst`` / ``weighted`` aggregation
     until the ``JUDGE_AXIS_IN_COMPOSITE`` gate flips (Session 2). See
     ``reports/2026-04-23-goodhart-immune-eval.md``.
-  * 2026-04-24: **Pareto holistic eval v2** — five new absolute-
-    correctness axes from public held-out benchmarks
-    (``math_bench``, ``code_bench``, ``reasoning_bench``,
-    ``knowledge_bench``, ``ifeval_bench``) added in SHADOW mode. See
-    ``reports/2026-04-24-pareto-holistic-eval-v2.md``. These break the
-    last Goodhart hole — the old six axes all scored *relative* to the
-    teacher, which means a perfectly-distilled model of a non-SOTA
-    teacher still ranked #1 but couldn't actually do grade-school math.
-    The new axes score against ground truth (GSM8K / HumanEval /
-    BBH / MMLU-Pro / IFEval), so overfitting them ⇒ SOTA small model.
-    Promoted to composite ranking when ``BENCH_AXES_IN_COMPOSITE=1``
-    (2026-04-26 by default).
+  * 2026-04-24: **Arena v3 — comprehensive eval**. Session 2 promoted:
+    the five absolute-correctness bench axes (``math_bench``,
+    ``code_bench``, ``reasoning_bench``, ``knowledge_bench``,
+    ``ifeval_bench``) and ``judge_probe`` are now all IN the composite
+    ranking by default. These break the last Goodhart hole — the old
+    six axes all scored *relative* to the teacher, so a perfectly-
+    distilled model of a non-SOTA teacher ranked #1 but couldn't do
+    grade-school math. New axes score against ground truth so
+    overfitting them ⇒ SOTA small model.
+  * 2026-04-24: **Session 3 axes added in SHADOW** (promote +48h):
+    ``aime_bench`` (AIME olympiad math), ``mbpp_bench`` (MBPP+ code),
+    ``tool_use_bench`` (agentic Python tool use), and
+    ``self_consistency_bench`` (majority-vote over sampled generations).
+    These give miners more surface area to optimize against, each
+    pointing towards a genuinely valuable capability. See
+    ``reports/2026-04-24-arena-v3.md`` for the full Affine-Cortex-
+    inspired design.
+  * 2026-04-24: **Pareto majority dominance** (SHADOW): in addition
+    to the worst-axis floor, a challenger that beats the king on KL
+    but loses on a majority of axes is flagged. Today informational
+    only (logged + surfaced in telemetry). Becomes part of the
+    dethrone gate when ``PARETO_DOMINANCE_GATE=1`` (after +48h
+    notice on Discord).
 
 Axes that are missing for a given round (e.g. ``degeneracy`` while
 ``THINK_COLLAPSE_PROBE=0``) drop out and the weighted mean renormalizes
@@ -78,36 +89,52 @@ AXIS_WEIGHTS = {
     "degeneracy": 0.15,
 }
 
-# 2026-04-23 — judge axis weight used only when promoted to production
-# via ``JUDGE_AXIS_IN_COMPOSITE=1``. When promoted, the remaining axes
-# retain their current relative weighting and the judge weight is added
-# on top before normalization; callers see a per-axis breakdown and the
-# aggregated worst/weighted, so the absolute number changes slightly
-# but ordering intent is preserved.
-JUDGE_AXIS_WEIGHT = float(os.environ.get("JUDGE_AXIS_WEIGHT", "0.20"))
+# 2026-04-23 — judge axis weight. When promoted, the other axes retain
+# their relative weighting and the judge weight is added on top before
+# normalization; callers see a per-axis breakdown and the aggregated
+# worst/weighted, so the absolute number changes slightly but the
+# ordering intent is preserved.
+JUDGE_AXIS_WEIGHT = float(os.environ.get("JUDGE_AXIS_WEIGHT", "0.15"))
 
-# Shadow/promote gate. False by default: judge axis is computed, stored
-# on each student's composite payload, and visible on the dashboard,
-# but is excluded from ``worst`` + ``weighted`` and cannot dethrone.
-# Flip to ``1`` during Session 2 rollout after 48h of telemetry.
-JUDGE_AXIS_IN_COMPOSITE = os.environ.get("JUDGE_AXIS_IN_COMPOSITE", "0") != "0"
+# Shadow/promote gate. 2026-04-24: PROMOTED to production after the
+# original 48h telemetry window. Override with ``JUDGE_AXIS_IN_COMPOSITE=0``
+# if a teacher-rubric outage requires a temporary rollback.
+JUDGE_AXIS_IN_COMPOSITE = os.environ.get("JUDGE_AXIS_IN_COMPOSITE", "1") != "0"
 
-# ── 2026-04-24 — Pareto holistic eval v2 ──────────────────────────────
-# Five absolute-correctness axes drawn from public held-out benchmarks.
-# Each normalized to [0, 1] by raw ``pass_frac``. Starts in shadow mode
-# (visible + logged but not ranking) and flips to production when
-# ``BENCH_AXES_IN_COMPOSITE=1``. See
-# ``reports/2026-04-24-pareto-holistic-eval-v2.md`` section 5 for the
-# staged weight proposal.
+# ── 2026-04-24 — Arena v3 Session 2 (PRODUCTION) ──────────────────────
+# Five absolute-correctness axes drawn from public held-out benchmarks
+# (GSM8K+MATH-500 / HumanEval / BBH / MMLU-Pro / IFEval). Each
+# normalized to [0, 1] by raw ``pass_frac``. Promoted to composite
+# ranking 2026-04-24 after the planned 48h shadow window (see the
+# 2026-04-24-pareto-holistic-eval-v2.md report section 5 + the
+# Discord 48h announcement).
 BENCH_AXIS_WEIGHTS = {
-    "math_bench":      float(os.environ.get("BENCH_MATH_WEIGHT", "0.15")),
-    "code_bench":      float(os.environ.get("BENCH_CODE_WEIGHT", "0.15")),
-    "reasoning_bench": float(os.environ.get("BENCH_REASONING_WEIGHT", "0.10")),
-    "knowledge_bench": float(os.environ.get("BENCH_KNOWLEDGE_WEIGHT", "0.10")),
+    "math_bench":      float(os.environ.get("BENCH_MATH_WEIGHT", "0.12")),
+    "code_bench":      float(os.environ.get("BENCH_CODE_WEIGHT", "0.12")),
+    "reasoning_bench": float(os.environ.get("BENCH_REASONING_WEIGHT", "0.08")),
+    "knowledge_bench": float(os.environ.get("BENCH_KNOWLEDGE_WEIGHT", "0.08")),
     "ifeval_bench":    float(os.environ.get("BENCH_IFEVAL_WEIGHT", "0.05")),
 }
 
-BENCH_AXES_IN_COMPOSITE = os.environ.get("BENCH_AXES_IN_COMPOSITE", "0") != "0"
+BENCH_AXES_IN_COMPOSITE = os.environ.get("BENCH_AXES_IN_COMPOSITE", "1") != "0"
+
+# ── 2026-04-24 — Arena v3 Session 3 (SHADOW, promote +48h) ────────────
+# Four capability-extending axes inspired by Affine Cortex's environment
+# suite. Each scores absolute correctness against a public gold source;
+# the ordering gain is in **coverage** — a model that overfits AIME
+# still had to actually learn olympiad math, a model that overfits
+# tool_use_bench still had to actually learn when to write Python.
+# Tuned weights are conservative (5-8%) so Session 2 + the relative
+# axes keep dominating the composite until the +48h public notice
+# completes. Flip ``ARENA_V3_AXES_IN_COMPOSITE=1`` to promote.
+ARENA_V3_AXIS_WEIGHTS = {
+    "aime_bench":              float(os.environ.get("BENCH_AIME_WEIGHT", "0.06")),
+    "mbpp_bench":              float(os.environ.get("BENCH_MBPP_WEIGHT", "0.06")),
+    "tool_use_bench":           float(os.environ.get("BENCH_TOOL_USE_WEIGHT", "0.04")),
+    "self_consistency_bench":   float(os.environ.get("BENCH_SC_WEIGHT", "0.04")),
+}
+
+ARENA_V3_AXES_IN_COMPOSITE = os.environ.get("ARENA_V3_AXES_IN_COMPOSITE", "0") != "0"
 
 # Per-axis minimum valid-item count below which the axis drops as
 # "insufficient sample". Small pools (code_bench samples only 4 items
@@ -119,9 +146,25 @@ BENCH_MIN_VALID = {
     "reasoning_bench": 4,
     "knowledge_bench": 4,
     "ifeval_bench": 4,
+    # Session 3 axes — small per-round budgets, so very tight floors.
+    "aime_bench": 2,
+    "mbpp_bench": 2,
+    "tool_use_bench": 2,
+    "self_consistency_bench": 2,
 }
 
-COMPOSITE_SHADOW_VERSION = 4
+COMPOSITE_SHADOW_VERSION = 5  # bumped for Arena v3
+
+# ── Pareto majority dominance (Session 3 shadow) ──────────────────────
+# An extra dethrone consideration: a challenger must beat the king on a
+# majority of scorable axes, not just the single worst axis. Inspired
+# by Affine Cortex's environment-level Pareto dominance. Starts as an
+# informational score logged + surfaced in telemetry; promotion to
+# dethrone gate flips via ``PARETO_DOMINANCE_GATE=1`` after the 48h
+# public notice.
+PARETO_DOMINANCE_MARGIN = float(os.environ.get("PARETO_DOMINANCE_MARGIN", "0.02"))
+PARETO_DOMINANCE_MIN_COMPARABLE = int(os.environ.get("PARETO_DOMINANCE_MIN_COMPARABLE", "5"))
+PARETO_DOMINANCE_GATE = os.environ.get("PARETO_DOMINANCE_GATE", "0") != "0"
 
 # ── Teacher sanity gate (2026-04-23) ──────────────────────────────────────
 # For each ranking axis we can optionally compute the axis value for the
@@ -302,6 +345,22 @@ def _axis_ifeval_bench(student: dict) -> float | None:
     return _axis_bench_pass_frac(student, "ifeval_bench")
 
 
+def _axis_aime_bench(student: dict) -> float | None:
+    return _axis_bench_pass_frac(student, "aime_bench")
+
+
+def _axis_mbpp_bench(student: dict) -> float | None:
+    return _axis_bench_pass_frac(student, "mbpp_bench")
+
+
+def _axis_tool_use_bench(student: dict) -> float | None:
+    return _axis_bench_pass_frac(student, "tool_use_bench")
+
+
+def _axis_self_consistency_bench(student: dict) -> float | None:
+    return _axis_bench_pass_frac(student, "self_consistency_bench")
+
+
 def _axis_on_policy_rkl(student: dict, king_rkl: float | None) -> float:
     """Normalize on-policy reverse KL to [0, 1] higher-is-better.
 
@@ -343,9 +402,11 @@ def compute_axes(student: dict, king_kl: float | None = None,
     row from ``results['students']``). Returns a dict keyed by axis name;
     values are floats in [0, 1] or None if the axis couldn't be computed.
 
-    The ``judge_probe`` key is always populated when the probe reported
-    data, but it is only included in ``worst`` / ``weighted`` aggregation
-    by ``compute_composite`` when ``JUDGE_AXIS_IN_COMPOSITE`` is truthy.
+    Session 3 axes (``aime_bench``, ``mbpp_bench``, ``tool_use_bench``,
+    ``self_consistency_bench``) are always computed when the probe
+    reported, but only included in ``worst`` / ``weighted`` aggregation
+    by ``compute_composite`` when ``ARENA_V3_AXES_IN_COMPOSITE`` is
+    truthy. Same shadow-then-promote pattern as Session 2.
     """
     return {
         "on_policy_rkl": _axis_on_policy_rkl(student, king_rkl),
@@ -359,6 +420,10 @@ def compute_axes(student: dict, king_kl: float | None = None,
         "reasoning_bench": _axis_reasoning_bench(student),
         "knowledge_bench": _axis_knowledge_bench(student),
         "ifeval_bench": _axis_ifeval_bench(student),
+        "aime_bench": _axis_aime_bench(student),
+        "mbpp_bench": _axis_mbpp_bench(student),
+        "tool_use_bench": _axis_tool_use_bench(student),
+        "self_consistency_bench": _axis_self_consistency_bench(student),
     }
 
 
@@ -379,12 +444,16 @@ def resolve_teacher_broken_axes(teacher_student_row: dict | None,
         return broken
     teacher_axes = compute_axes(teacher_student_row, king_kl, king_rkl)
     # Build the set of axes the teacher is actually being scored on this
-    # round. AXIS_WEIGHTS + (judge if promoted) + (bench if promoted).
+    # round: AXIS_WEIGHTS + (judge if promoted) + (Session 2 bench if
+    # promoted) + (Session 3 Arena v3 bench if promoted).
     applicable = set(AXIS_WEIGHTS.keys())
     if JUDGE_AXIS_IN_COMPOSITE:
         applicable.add("judge_probe")
     if BENCH_AXES_IN_COMPOSITE:
         for k in BENCH_AXIS_WEIGHTS:
+            applicable.add(k)
+    if ARENA_V3_AXES_IN_COMPOSITE:
+        for k in ARENA_V3_AXIS_WEIGHTS:
             applicable.add(k)
     for axis, val in teacher_axes.items():
         if axis not in applicable:
@@ -420,16 +489,20 @@ def compute_composite(student: dict, king_kl: float | None = None,
     anchors).
     """
     axes = compute_axes(student, king_kl, king_rkl)
-    # Build effective weights: both the judge axis and the five bench
-    # axes are shadow-only until their respective gates flip
-    # (``JUDGE_AXIS_IN_COMPOSITE`` / ``BENCH_AXES_IN_COMPOSITE``).
+    # Build effective weights. Shadow-only axes flip in when their
+    # respective gates are set (``JUDGE_AXIS_IN_COMPOSITE`` /
+    # ``BENCH_AXES_IN_COMPOSITE`` / ``ARENA_V3_AXES_IN_COMPOSITE``).
     # Keeping this local to compute_composite so a single env flip
-    # flows to every caller without touching AXIS_WEIGHTS.
+    # flows to every caller without touching the weight dicts.
     effective_weights = dict(AXIS_WEIGHTS)
     if JUDGE_AXIS_IN_COMPOSITE:
         effective_weights["judge_probe"] = JUDGE_AXIS_WEIGHT
     if BENCH_AXES_IN_COMPOSITE:
         for k, w in BENCH_AXIS_WEIGHTS.items():
+            if w > 0:
+                effective_weights[k] = w
+    if ARENA_V3_AXES_IN_COMPOSITE:
+        for k, w in ARENA_V3_AXIS_WEIGHTS.items():
             if w > 0:
                 effective_weights[k] = w
     ranked = {
@@ -442,7 +515,9 @@ def compute_composite(student: dict, king_kl: float | None = None,
         return {"version": COMPOSITE_SHADOW_VERSION, "axes": axes,
                 "worst": None, "weighted": None, "present_count": 0,
                 "broken_axes": sorted(broken_axes) if broken_axes else [],
-                "judge_in_composite": JUDGE_AXIS_IN_COMPOSITE}
+                "judge_in_composite": JUDGE_AXIS_IN_COMPOSITE,
+                "bench_in_composite": BENCH_AXES_IN_COMPOSITE,
+                "arena_v3_in_composite": ARENA_V3_AXES_IN_COMPOSITE}
     worst = min(ranked.values())
     total_w = sum(effective_weights[k] for k in ranked)
     weighted = sum(effective_weights[k] * v for k, v in ranked.items()) / total_w if total_w else None
@@ -455,6 +530,93 @@ def compute_composite(student: dict, king_kl: float | None = None,
         "broken_axes": sorted(broken_axes) if broken_axes else [],
         "judge_in_composite": JUDGE_AXIS_IN_COMPOSITE,
         "bench_in_composite": BENCH_AXES_IN_COMPOSITE,
+        "arena_v3_in_composite": ARENA_V3_AXES_IN_COMPOSITE,
+    }
+
+
+def compute_pareto_dominance(
+    challenger_axes: dict[str, float | None],
+    king_axes: dict[str, float | None],
+    margin: float | None = None,
+    min_comparable: int | None = None,
+    include_shadow: bool = True,
+) -> dict[str, Any]:
+    """Compute pairwise Pareto dominance of challenger vs king across axes.
+
+    Returns a dict with:
+      * ``wins``: axes where challenger > king + margin (strictly better).
+      * ``losses``: axes where king > challenger + margin (strictly worse).
+      * ``ties``: axes where |challenger - king| <= margin (within noise).
+      * ``comparable``: count of axes where both have data.
+      * ``pareto_wins`` (bool): challenger beats king on a majority of
+        comparable axes AND does not lose on more axes than it wins.
+        This is the "soft Pareto dominance" the Affine subnet uses:
+        rather than requiring strict dominance on every axis (noisy
+        and unwinnable), we require the challenger to win a majority
+        without losing more than it wins. Returns False on
+        insufficient comparable axes (fails open — the existing
+        worst-axis gate still applies).
+
+    The ``include_shadow`` flag controls whether axes that are currently
+    in SHADOW mode are considered. By default we include them so the
+    Pareto score reflects the full eval surface — shadow axes are
+    designed to become production, this score is how we judge whether
+    they're ready to flip.
+    """
+    margin = margin if margin is not None else PARETO_DOMINANCE_MARGIN
+    min_comparable = (
+        min_comparable if min_comparable is not None
+        else PARETO_DOMINANCE_MIN_COMPARABLE
+    )
+    axes_to_consider = set(AXIS_WEIGHTS.keys()) | {"judge_probe"}
+    axes_to_consider |= set(BENCH_AXIS_WEIGHTS.keys())
+    if include_shadow:
+        axes_to_consider |= set(ARENA_V3_AXIS_WEIGHTS.keys())
+
+    wins: list[str] = []
+    losses: list[str] = []
+    ties: list[str] = []
+    comparable = 0
+    for axis in axes_to_consider:
+        c = challenger_axes.get(axis)
+        k = king_axes.get(axis)
+        if c is None or k is None:
+            continue
+        comparable += 1
+        if c > k + margin:
+            wins.append(axis)
+        elif k > c + margin:
+            losses.append(axis)
+        else:
+            ties.append(axis)
+    if comparable < min_comparable:
+        pareto_wins = False
+        reason = f"insufficient_comparable_axes ({comparable} < {min_comparable})"
+    else:
+        # "Soft" Pareto: majority win AND net wins >= 0.
+        majority = (comparable // 2) + 1
+        pareto_wins = len(wins) >= majority and len(wins) >= len(losses)
+        reason = (
+            "dominates"
+            if pareto_wins
+            else (
+                "no_majority"
+                if len(wins) < majority
+                else "more_losses_than_wins"
+            )
+        )
+    return {
+        "wins": sorted(wins),
+        "losses": sorted(losses),
+        "ties": sorted(ties),
+        "comparable": comparable,
+        "n_wins": len(wins),
+        "n_losses": len(losses),
+        "n_ties": len(ties),
+        "margin": margin,
+        "min_comparable": min_comparable,
+        "pareto_wins": bool(pareto_wins),
+        "reason": reason,
     }
 
 
@@ -516,9 +678,26 @@ def annotate_h2h_with_composite(h2h_results: list[dict], king_kl: float | None,
     challenger's composite ranking this round with a note, preventing a
     miscalibrated axis from corrupting rankings (2026-04-19 failure
     class). If None / absent, every axis stays in play — fail open.
+
+    2026-04-24 (Arena v3): also attaches a ``pareto`` sub-dict to each
+    non-king row describing wins/losses/ties vs the current king across
+    every available axis (shadow + production). The ``pareto_wins``
+    boolean is informational-only until ``PARETO_DOMINANCE_GATE`` is
+    flipped to production; meanwhile it is surfaced in the dashboard
+    and telemetry so we can validate the gate's behavior on real data
+    before promotion.
     """
     king_rkl = _resolve_king_rkl(king_kl, students_data, h2h_results)
     broken = resolve_teacher_broken_axes(teacher_student_row, king_kl, king_rkl)
+
+    king_model = None
+    king_entry = next((r for r in h2h_results if r.get("is_king")), None)
+    if king_entry:
+        king_model = king_entry.get("model")
+    king_raw_axes = None
+    if king_model and king_model in students_data:
+        king_raw_axes = compute_axes(students_data[king_model], king_kl, king_rkl)
+
     for entry in h2h_results:
         model = entry.get("model")
         if not model or model not in students_data:
@@ -527,4 +706,13 @@ def annotate_h2h_with_composite(h2h_results: list[dict], king_kl: float | None,
         if entry.get("disqualified") and not entry.get("is_king"):
             comp = {**comp, "worst": 0.0, "weighted": 0.0,
                     "disqualified": True, "dq_reason": entry.get("dq_reason")}
+        # Pareto dominance vs king (non-king rows only — a king Pareto
+        # score against itself is definitionally the trivial tie case).
+        if king_raw_axes is not None and not entry.get("is_king"):
+            challenger_raw_axes = compute_axes(
+                students_data[model], king_kl, king_rkl,
+            )
+            comp["pareto"] = compute_pareto_dominance(
+                challenger_raw_axes, king_raw_axes, include_shadow=True,
+            )
         entry["composite"] = comp

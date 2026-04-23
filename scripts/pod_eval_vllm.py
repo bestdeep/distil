@@ -1817,40 +1817,70 @@ def _render_chat_prompt(tokenizer, user_text: str, enable_thinking: bool = False
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# § Pareto holistic bench battery — 2026-04-24, shadow mode
+# § Arena v3 bench battery — 2026-04-24 (Session 2 prod) + Session 3 (shadow)
 # ═══════════════════════════════════════════════════════════════════════
-# Five axes drawn from public, held-out benchmarks cached on the eval
-# pod:
-#   math_bench      — GSM8K test (1319) + MATH-500 test (500), exact answer
-#   code_bench      — HumanEval test (164), subprocess-sandboxed unit tests
-#   reasoning_bench — BBH (~5250) across 21 objective subtasks, exact-match
-#   knowledge_bench — MMLU-Pro test (12032), MC letter
-#   ifeval_bench    — IFEval train (541 filtered → ~240), instruction-follow
+# Absolute-correctness axes drawn from public, held-out benchmarks cached
+# on the eval pod. These are the "Goodhart-immune" axes: scoring is
+# against ground truth (not vs teacher) so overfitting them ⇒ genuine
+# SOTA small model.
 #
-# Each probe samples 4-8 items per round via ``_pick_bench_items`` seeded
-# by the on-chain ``block_seed``, so every validator computes the same
-# items but the items rotate round-to-round. Scoring is absolute
-# (ground-truth anchored, no teacher dependency), which is what makes
-# these axes "Goodhart-immune": overfit ⇒ SOTA model.
+# Session 2 (PRODUCTION, promoted 2026-04-24):
+#   math_bench         — GSM8K test (1319) + MATH-500 test (500)
+#   code_bench         — HumanEval test (164), subprocess-sandboxed tests
+#   reasoning_bench    — BBH (~5250), 21 objective subtasks, exact-match
+#   knowledge_bench    — MMLU-Pro test (12032), MC letter
+#   ifeval_bench       — IFEval train (~240 filtered), instruction-follow
 #
-# See ``reports/2026-04-24-pareto-holistic-eval-v2.md`` for the full
-# architecture + Affine-Cortex inspiration.
+# Session 3 (SHADOW → production +48h, added 2026-04-24):
+#   aime_bench         — AIME25 + AIME2024 (~90 olympiad items), boxed
+#   mbpp_bench         — MBPP+ test (378 programming items), sandbox
+#   tool_use_bench     — Math items with injected Python tool (agentic
+#                        two-pass) — tests whether the model can leverage
+#                        external compute when useful
+#   self_consistency_bench — Hard math items, 5 samples at T=0.7 → majority
+#                        vote → compare to gold. Tests robustness of
+#                        underlying knowledge vs one-shot luck.
+#
+# Each probe samples K items per round via ``_pick_bench_items`` seeded by
+# the on-chain ``block_seed``, so every validator computes the same
+# items but they rotate round-to-round (anti-memorization).
+#
+# See ``reports/2026-04-24-arena-v3.md`` for the Affine-Cortex-inspired
+# design doc and rationale.
 
 BENCH_BATTERY_ENABLED = os.environ.get("BENCH_BATTERY_ENABLED", "1") != "0"
 
+# Session 2 per-round sample counts.
 BENCH_MATH_PER_ROUND = int(os.environ.get("BENCH_MATH_PER_ROUND", "8"))
 BENCH_CODE_PER_ROUND = int(os.environ.get("BENCH_CODE_PER_ROUND", "4"))
 BENCH_REASONING_PER_ROUND = int(os.environ.get("BENCH_REASONING_PER_ROUND", "8"))
 BENCH_KNOWLEDGE_PER_ROUND = int(os.environ.get("BENCH_KNOWLEDGE_PER_ROUND", "8"))
 BENCH_IFEVAL_PER_ROUND = int(os.environ.get("BENCH_IFEVAL_PER_ROUND", "8"))
 
+# Session 3 per-round sample counts — kept small since these axes are
+# heavier per item (olympiad math needs more tokens; self-consistency
+# generates 5 samples; tool use requires 2 passes).
+BENCH_AIME_PER_ROUND = int(os.environ.get("BENCH_AIME_PER_ROUND", "4"))
+BENCH_MBPP_PER_ROUND = int(os.environ.get("BENCH_MBPP_PER_ROUND", "4"))
+BENCH_TOOL_USE_PER_ROUND = int(os.environ.get("BENCH_TOOL_USE_PER_ROUND", "4"))
+BENCH_SELF_CONSISTENCY_PER_ROUND = int(os.environ.get("BENCH_SELF_CONSISTENCY_PER_ROUND", "4"))
+BENCH_SELF_CONSISTENCY_SAMPLES = int(os.environ.get("BENCH_SELF_CONSISTENCY_SAMPLES", "5"))
+BENCH_SELF_CONSISTENCY_TEMP = float(os.environ.get("BENCH_SELF_CONSISTENCY_TEMP", "0.7"))
+BENCH_SELF_CONSISTENCY_TOPP = float(os.environ.get("BENCH_SELF_CONSISTENCY_TOPP", "0.9"))
+
+# Token budgets.
 BENCH_MATH_MAX_TOKENS = int(os.environ.get("BENCH_MATH_MAX_TOKENS", "384"))
 BENCH_CODE_MAX_TOKENS = int(os.environ.get("BENCH_CODE_MAX_TOKENS", "512"))
 BENCH_REASONING_MAX_TOKENS = int(os.environ.get("BENCH_REASONING_MAX_TOKENS", "128"))
 BENCH_KNOWLEDGE_MAX_TOKENS = int(os.environ.get("BENCH_KNOWLEDGE_MAX_TOKENS", "48"))
 BENCH_IFEVAL_MAX_TOKENS = int(os.environ.get("BENCH_IFEVAL_MAX_TOKENS", "512"))
+BENCH_AIME_MAX_TOKENS = int(os.environ.get("BENCH_AIME_MAX_TOKENS", "1024"))
+BENCH_MBPP_MAX_TOKENS = int(os.environ.get("BENCH_MBPP_MAX_TOKENS", "512"))
+BENCH_TOOL_USE_MAX_TOKENS = int(os.environ.get("BENCH_TOOL_USE_MAX_TOKENS", "320"))
+BENCH_SELF_CONSISTENCY_MAX_TOKENS = int(os.environ.get("BENCH_SELF_CONSISTENCY_MAX_TOKENS", "512"))
+BENCH_TOOL_USE_SANDBOX_TIMEOUT_S = float(os.environ.get("BENCH_TOOL_USE_SANDBOX_TIMEOUT_S", "4.0"))
 
-# Per-bench RNG stream offsets so the five axes draw from independent
+# Per-bench RNG stream offsets so the axes draw from independent
 # substreams even when given the same block_seed. Hex constants are
 # arbitrary high-entropy values (NOT the same as the think/rkl/judge
 # offsets).
@@ -1860,14 +1890,20 @@ _BENCH_STREAM = {
     "reasoning": 0xBBBBB117,
     "knowledge": 0x4A11A7E4,
     "ifeval": 0x1FEAF001,
+    "aime": 0xA1E7E001,          # Session 3
+    "mbpp": 0x00B00B88,          # Session 3
+    "tool_use": 0x700101C0,      # Session 3
+    "self_consistency": 0x5CC001, # Session 3
 }
 
 _BENCH_BLOCK_SEED = None
 _BENCH_POOLS: dict[str, list[dict]] = {
     "math": [], "code": [], "reasoning": [], "knowledge": [], "ifeval": [],
+    "aime": [], "mbpp": [], "tool_use": [], "self_consistency": [],
 }
 _BENCH_SAMPLES: dict[str, list[dict]] = {
     "math": [], "code": [], "reasoning": [], "knowledge": [], "ifeval": [],
+    "aime": [], "mbpp": [], "tool_use": [], "self_consistency": [],
 }
 
 
@@ -2002,6 +2038,132 @@ def _bench_load_pools(verbose: bool = True):
         if verbose:
             print(f"[bench] ifeval load error: {e}", flush=True)
 
+    # ── aime_bench: AIME 2024/2025 olympiad math (Session 3) ────────
+    # We combine three small AIME datasets into one pool so we get ~90
+    # olympiad items per round to rotate through. Each answer is an
+    # integer 0..999 (AIME convention), making scoring trivially
+    # robust — boxed-answer extraction + exact-integer compare.
+    try:
+        aime25 = load_dataset("HuggingFaceH4/aime_2025", split="train")
+        for item in aime25:
+            q = item.get("problem") or item.get("question")
+            a = item.get("answer")
+            if q and a is not None:
+                _BENCH_POOLS["aime"].append({
+                    "src": "aime25",
+                    "question": str(q),
+                    "gold": str(a).strip(),
+                })
+    except Exception as e:
+        if verbose:
+            print(f"[bench] aime25 load error: {e}", flush=True)
+    try:
+        aime24 = load_dataset("Maxwell-Jia/AIME_2024", split="train")
+        for item in aime24:
+            q = item.get("Problem") or item.get("problem") or item.get("question")
+            a = item.get("Answer") or item.get("answer")
+            if q and a is not None:
+                _BENCH_POOLS["aime"].append({
+                    "src": "aime24",
+                    "question": str(q),
+                    "gold": str(a).strip(),
+                })
+    except Exception as e:
+        if verbose:
+            print(f"[bench] aime24 load error: {e}", flush=True)
+    try:
+        aimo = load_dataset("AI-MO/aimo-validation-aime", split="train")
+        for item in aimo:
+            q = item.get("problem") or item.get("question")
+            a = item.get("answer")
+            if q and a is not None:
+                _BENCH_POOLS["aime"].append({
+                    "src": "aimo-val",
+                    "question": str(q),
+                    "gold": str(a).strip(),
+                })
+    except Exception as e:
+        if verbose:
+            print(f"[bench] aimo-val load error: {e}", flush=True)
+
+    # ── mbpp_bench: MBPP+ (evalplus, Session 3) ─────────────────────
+    # 378 Python programming problems with bundled unit tests. Same
+    # subprocess-sandbox path as HumanEval but a different pool so
+    # miners can't overfit just by memorizing 164 HumanEval signatures.
+    try:
+        mbpp = load_dataset("evalplus/mbppplus", split="test")
+        for item in mbpp:
+            prompt = item.get("prompt") or ""
+            tests = item.get("test") or item.get("test_list")
+            if isinstance(tests, list):
+                tests = "\n".join(tests)
+            entry_point = item.get("entry_point") or ""
+            if not entry_point:
+                # MBPP canonical tests call the function directly, extract from assertion.
+                if isinstance(tests, str):
+                    m = re.search(r"assert\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", tests)
+                    if m:
+                        entry_point = m.group(1)
+            if not (prompt and tests and entry_point):
+                continue
+            _BENCH_POOLS["mbpp"].append({
+                "src": "mbpp+",
+                "task_id": str(item.get("task_id", "")),
+                "prompt": prompt,
+                "test": tests,
+                "entry_point": entry_point,
+            })
+    except Exception as e:
+        if verbose:
+            print(f"[bench] mbpp+ load error: {e}", flush=True)
+
+    # ── tool_use_bench pool (Session 3, derived) ────────────────────
+    # Reuses math items but only the ones with numerically tractable
+    # gold answers — these are the problems where writing 3 lines of
+    # Python (``<python>...</python>``) + getting the tool output back
+    # actually helps the model. Source of truth is still the math pool's
+    # gold so no additional dataset download is required.
+    if _BENCH_POOLS["math"]:
+        for it in _BENCH_POOLS["math"]:
+            g = (it.get("gold") or "").replace(",", "").replace("$", "").strip()
+            try:
+                float(g)
+            except (TypeError, ValueError):
+                # Skip items with symbolic / fractional gold — tool-use
+                # probe rewards numeric computation, not algebra.
+                continue
+            _BENCH_POOLS["tool_use"].append({
+                "src": "tool_use/" + it.get("src", "math"),
+                "question": it["question"],
+                "gold": g,
+            })
+
+    # ── self_consistency_bench pool (Session 3, derived) ────────────
+    # Hard math items only (MATH-500 and the larger-answer GSM8K items).
+    # Self-consistency is about *robustness* of underlying knowledge
+    # across samples — easy items score 1.0 for everyone regardless of
+    # sampling temperature and waste probe budget.
+    if _BENCH_POOLS["math"]:
+        for it in _BENCH_POOLS["math"]:
+            if it.get("src") == "math500":
+                _BENCH_POOLS["self_consistency"].append({
+                    "src": "sc/math500",
+                    "question": it["question"],
+                    "gold": it["gold"],
+                })
+                continue
+            g = (it.get("gold") or "").replace(",", "").replace("$", "").strip()
+            try:
+                gv = float(g)
+            except (TypeError, ValueError):
+                continue
+            if abs(gv) >= 100:
+                _BENCH_POOLS["self_consistency"].append({
+                    "src": "sc/gsm8k_hard",
+                    "question": it["question"],
+                    "gold": g,
+                })
+
     if verbose:
         print(
             f"[bench] pools loaded: "
@@ -2009,7 +2171,11 @@ def _bench_load_pools(verbose: bool = True):
             f"code={len(_BENCH_POOLS['code'])}, "
             f"reasoning={len(_BENCH_POOLS['reasoning'])}, "
             f"knowledge={len(_BENCH_POOLS['knowledge'])}, "
-            f"ifeval={len(_BENCH_POOLS['ifeval'])}",
+            f"ifeval={len(_BENCH_POOLS['ifeval'])}, "
+            f"aime={len(_BENCH_POOLS['aime'])}, "
+            f"mbpp={len(_BENCH_POOLS['mbpp'])}, "
+            f"tool_use={len(_BENCH_POOLS['tool_use'])}, "
+            f"self_consistency={len(_BENCH_POOLS['self_consistency'])}",
             flush=True,
         )
 
@@ -2085,12 +2251,22 @@ def set_bench_block_seed(block_seed):
     _BENCH_SAMPLES["reasoning"] = _pick_bench_items("reasoning", block_seed, BENCH_REASONING_PER_ROUND)
     _BENCH_SAMPLES["knowledge"] = _pick_bench_items("knowledge", block_seed, BENCH_KNOWLEDGE_PER_ROUND)
     _BENCH_SAMPLES["ifeval"] = _pick_bench_items("ifeval", block_seed, BENCH_IFEVAL_PER_ROUND)
+    _BENCH_SAMPLES["aime"] = _pick_bench_items("aime", block_seed, BENCH_AIME_PER_ROUND)
+    _BENCH_SAMPLES["mbpp"] = _pick_bench_items("mbpp", block_seed, BENCH_MBPP_PER_ROUND)
+    _BENCH_SAMPLES["tool_use"] = _pick_bench_items("tool_use", block_seed, BENCH_TOOL_USE_PER_ROUND)
+    _BENCH_SAMPLES["self_consistency"] = _pick_bench_items(
+        "self_consistency", block_seed, BENCH_SELF_CONSISTENCY_PER_ROUND,
+    )
     print(
         f"[bench] round samples: math={len(_BENCH_SAMPLES['math'])}, "
         f"code={len(_BENCH_SAMPLES['code'])}, "
         f"reasoning={len(_BENCH_SAMPLES['reasoning'])}, "
         f"knowledge={len(_BENCH_SAMPLES['knowledge'])}, "
-        f"ifeval={len(_BENCH_SAMPLES['ifeval'])}",
+        f"ifeval={len(_BENCH_SAMPLES['ifeval'])}, "
+        f"aime={len(_BENCH_SAMPLES['aime'])}, "
+        f"mbpp={len(_BENCH_SAMPLES['mbpp'])}, "
+        f"tool_use={len(_BENCH_SAMPLES['tool_use'])}, "
+        f"self_consistency={len(_BENCH_SAMPLES['self_consistency'])}",
         flush=True,
     )
 
@@ -2509,23 +2685,466 @@ def ifeval_bench_probe(model, tokenizer, device="cuda"):
     return out
 
 
+# ── Session 3 bench probes ─────────────────────────────────────────────
+
+def _bench_generate_sampled(model, tokenizer, prompt: str, max_new_tokens: int,
+                             device: str, temperature: float, top_p: float,
+                             seed: int | None = None,
+                             enable_thinking: bool = False) -> tuple[str, int]:
+    """Stochastic generation variant of ``_bench_generate`` for self-consistency.
+
+    Seeds torch locally around the generate() call so sampled outputs
+    are reproducible across validators (deterministic given the same
+    (prompt, seed, temperature, top_p)). Everything else matches the
+    greedy variant for behavioral parity.
+    """
+    eos_ids = []
+    for tok in ("<|im_end|>", "<|endoftext|>"):
+        tid = tokenizer.convert_tokens_to_ids(tok)
+        if isinstance(tid, int) and tid >= 0:
+            eos_ids.append(tid)
+    if getattr(tokenizer, "eos_token_id", None) is not None:
+        eos_ids.append(int(tokenizer.eos_token_id))
+    eos_ids = list(set(eos_ids)) or None
+    pad_id = getattr(tokenizer, "pad_token_id", None) or (eos_ids[0] if eos_ids else 0)
+    rendered = _render_chat_prompt(tokenizer, prompt, enable_thinking=enable_thinking)
+    ids = tokenizer(rendered, return_tensors="pt").input_ids.to(device)
+    prev_state = None
+    if seed is not None:
+        prev_state = torch.random.get_rng_state()
+        torch.manual_seed(int(seed) & 0x7FFFFFFF)
+        if device == "cuda" and torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed) & 0x7FFFFFFF)
+    try:
+        gen = model.generate(
+            ids, max_new_tokens=max_new_tokens,
+            do_sample=True, temperature=temperature, top_p=top_p,
+            pad_token_id=pad_id, eos_token_id=eos_ids, use_cache=True,
+        )
+    finally:
+        if prev_state is not None:
+            torch.random.set_rng_state(prev_state)
+    new_ids = gen[0, ids.shape[1]:]
+    text = tokenizer.decode(new_ids, skip_special_tokens=True)
+    return text, int(new_ids.shape[0])
+
+
+# ── aime_bench (Session 3) ─────────────────────────────────────────────
+
+_AIME_INT_RE = re.compile(r"-?\d+")
+
+
+def _aime_format_prompt(question: str) -> str:
+    return (
+        f"{question}\n\n"
+        "This is an AIME problem. The answer is an integer between 0 and 999. "
+        "Solve the problem step by step and end your response with "
+        "'\\boxed{ANSWER}' where ANSWER is the final integer."
+    )
+
+
+def _aime_extract_answer(text: str) -> str:
+    cleaned = _strip_thinking_probe(text or "")
+    if not cleaned:
+        return ""
+    boxed = _extract_boxed(cleaned)
+    if boxed:
+        m = _AIME_INT_RE.search(boxed.replace(",", ""))
+        if m:
+            return m.group(0)
+    m = _MATH_ANSWER_PHRASE_RE.search(cleaned)
+    if m:
+        frag = m.group(1).strip().rstrip(".,")
+        im = _AIME_INT_RE.search(frag.replace(",", ""))
+        if im:
+            return im.group(0)
+    nums = _AIME_INT_RE.findall(cleaned.replace(",", ""))
+    if nums:
+        return nums[-1]
+    return ""
+
+
+def _aime_score_one(pred: str, gold: str) -> int:
+    if not pred:
+        return 0
+    try:
+        p = int(pred.strip().lstrip("0") or "0")
+        g = int(gold.replace(",", "").strip().lstrip("0") or "0")
+        return 1 if p == g else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def aime_bench_probe(model, tokenizer, device="cuda"):
+    out = {"n": 0, "correct": 0, "pass_frac": 0.0, "items": []}
+    samples = _BENCH_SAMPLES.get("aime") or []
+    if not samples or model is None or tokenizer is None:
+        return out
+    try:
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            for it in samples:
+                try:
+                    prompt_text = _aime_format_prompt(it["question"])
+                    text, _ = _bench_generate(
+                        model, tokenizer, prompt_text,
+                        BENCH_AIME_MAX_TOKENS, device, enable_thinking=False,
+                    )
+                    pred = _aime_extract_answer(text)
+                    ok = _aime_score_one(pred, it["gold"])
+                    out["items"].append({
+                        "src": it.get("src", ""),
+                        "pred": pred[:20],
+                        "gold": it["gold"][:20],
+                        "ok": bool(ok),
+                        "tail": text[-120:],
+                    })
+                    out["n"] += 1
+                    out["correct"] += ok
+                except Exception as e:
+                    out["items"].append({"src": it.get("src", ""), "error": str(e)[:120]})
+        if was_training:
+            model.train()
+        out["pass_frac"] = out["correct"] / max(1, out["n"])
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+# ── mbpp_bench (Session 3) ─────────────────────────────────────────────
+
+def _mbpp_build_prompt(item: dict) -> str:
+    """MBPP items typically frame as 'write a function that X. Your code should
+    pass these tests: [...]'. We pass the prompt verbatim so the model sees
+    the same specification a miner targets in their dataset pipeline.
+    """
+    return (
+        "You are an expert Python programmer. Write a complete, correct "
+        "Python solution for the task below. Output only the function "
+        "definition (no markdown fences, no explanation, no commentary).\n\n"
+        f"{item['prompt']}"
+    )
+
+
+def mbpp_bench_probe(model, tokenizer, device="cuda"):
+    out = {"n": 0, "correct": 0, "pass_frac": 0.0, "items": []}
+    samples = _BENCH_SAMPLES.get("mbpp") or []
+    if not samples or model is None or tokenizer is None:
+        return out
+    try:
+        import humaneval_sandbox as hs  # type: ignore
+    except ImportError:
+        out["error"] = "humaneval_sandbox not importable on pod"
+        return out
+    try:
+        generations: list[tuple[str, dict]] = []
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            for it in samples:
+                try:
+                    prompt_text = _mbpp_build_prompt(it)
+                    gen, _ = _bench_generate(
+                        model, tokenizer, prompt_text,
+                        BENCH_MBPP_MAX_TOKENS, device, enable_thinking=False,
+                    )
+                    generations.append((gen, it))
+                except Exception as e:
+                    generations.append(("", {**it, "gen_error": str(e)[:120]}))
+        if was_training:
+            model.train()
+        # MBPP solutions often don't stub the function signature at the
+        # top of the prompt the way HumanEval does (which uses signature
+        # + docstring). To reuse the sandbox runner, wrap the generated
+        # body inside a trivial pass-through prompt — this keeps the
+        # runner's concatenation (prompt+completion+test) semantically
+        # the same (tests call the function by name and that name is
+        # defined in the completion).
+        sandbox_input = [
+            ("", _strip_thinking_probe(gen or ""), it["test"], it["entry_point"])
+            for gen, it in generations if "gen_error" not in it
+        ]
+        sandbox_results = hs.run_batch(sandbox_input, max_workers=4) if sandbox_input else []
+        idx = 0
+        for gen, it in generations:
+            if "gen_error" in it:
+                out["items"].append({
+                    "task_id": it.get("task_id"), "error": it["gen_error"],
+                })
+                continue
+            r = sandbox_results[idx] if idx < len(sandbox_results) else None
+            idx += 1
+            ok = bool(r and r.passed)
+            out["items"].append({
+                "task_id": it.get("task_id"),
+                "entry_point": it.get("entry_point"),
+                "ok": ok,
+                "reason": (r.reason if r else "no_result")[:120],
+                "tail": (gen or "")[-160:],
+            })
+            out["n"] += 1
+            out["correct"] += int(ok)
+        out["pass_frac"] = out["correct"] / max(1, out["n"])
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+# ── tool_use_bench (Session 3, agentic) ────────────────────────────────
+
+_TOOL_CALL_RE = re.compile(r"<python>\s*(.*?)\s*</python>", re.DOTALL)
+_TOOL_USE_INSTRUCTION = (
+    "You have access to a Python calculator. To use it, write "
+    "`<python>CODE</python>` and the environment will execute CODE and "
+    "return the stdout as `<output>RESULT</output>`. Then continue and "
+    "give your final answer inside `\\boxed{ANSWER}`. "
+    "If you don't need the calculator, just solve normally."
+)
+
+
+def _tool_use_run_sandboxed(code: str, timeout_s: float) -> str:
+    """Execute ``code`` in an isolated subprocess and return captured stdout.
+
+    Lightweight sibling of ``humaneval_sandbox.run_one``: we don't need a
+    test harness for tool-use (the model's answer is graded separately
+    by ``_extract_boxed``), we just need to run the snippet and surface
+    stdout. Subprocess uses ``python3 -I -S`` so user site-packages and
+    PYTHONPATH are ignored; HOME/TMPDIR scoped to the temp dir; no
+    network capability is granted (subprocess inherits none). Returns a
+    short string trimmed to 400 chars so tool output never dominates
+    the model's context window.
+    """
+    if not code.strip():
+        return ""
+    import subprocess, tempfile, os as _os, sys as _sys
+    try:
+        with tempfile.TemporaryDirectory(prefix="tool_use_") as tmp:
+            script = _os.path.join(tmp, "snippet.py")
+            with open(script, "w") as f:
+                f.write(code)
+            env = {
+                "PATH": _os.environ.get("PATH", ""),
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "PYTHONNOUSERSITE": "1",
+                "HOME": tmp,
+                "TMPDIR": tmp,
+            }
+            try:
+                proc = subprocess.run(
+                    [_sys.executable, "-I", "-S", script],
+                    cwd=tmp, env=env, capture_output=True, text=True,
+                    timeout=timeout_s,
+                )
+                out_s = (proc.stdout or "")[:400]
+                if not out_s and proc.stderr:
+                    out_s = f"[stderr] {(proc.stderr or '')[:400]}"
+                return out_s
+            except subprocess.TimeoutExpired:
+                return "[timeout]"
+            except Exception as e:
+                return f"[error] {str(e)[:200]}"
+    except Exception as e:
+        return f"[sandbox-err] {str(e)[:200]}"
+
+
+def tool_use_bench_probe(model, tokenizer, device="cuda"):
+    """Two-pass agentic probe. Pass 1: model sees problem + tool description,
+    generates reasoning + optional ``<python>...</python>`` call. If a tool
+    call is detected we execute it sandboxed (stdout captured, 4s timeout)
+    and run Pass 2: the model continues with the tool output spliced in,
+    producing a final ``\\boxed{ANSWER}``. Score against gold numerically.
+
+    Design intent: this is the "can the model leverage external compute when
+    the problem needs it?" axis. It mirrors Affine Cortex's ``tool_use``
+    environment spirit without requiring the validator to keep a persistent
+    chat session per student — a single-turn tool-use pattern is enough to
+    expose models that hallucinate arithmetic they could trivially delegate.
+    """
+    out = {"n": 0, "correct": 0, "pass_frac": 0.0, "items": []}
+    samples = _BENCH_SAMPLES.get("tool_use") or []
+    if not samples or model is None or tokenizer is None:
+        return out
+    try:
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            for it in samples:
+                try:
+                    pass1_prompt = (
+                        f"{it['question']}\n\n{_TOOL_USE_INSTRUCTION}"
+                    )
+                    text1, _ = _bench_generate(
+                        model, tokenizer, pass1_prompt,
+                        BENCH_TOOL_USE_MAX_TOKENS, device, enable_thinking=False,
+                    )
+                    m = _TOOL_CALL_RE.search(text1)
+                    tool_result = None
+                    tool_used = False
+                    combined_text = text1
+                    if m:
+                        tool_used = True
+                        code = m.group(1)
+                        tool_result = _tool_use_run_sandboxed(
+                            code, BENCH_TOOL_USE_SANDBOX_TIMEOUT_S,
+                        )
+                        # Pass 2: continue generation with the tool
+                        # output spliced in. We rebuild the prompt so
+                        # the model sees ``<output>...</output>`` and
+                        # then continues producing the final boxed
+                        # answer.
+                        pass2_prompt = (
+                            f"{pass1_prompt}\n"
+                            f"{text1[:m.end()]}\n"
+                            f"<output>{tool_result}</output>\n"
+                            "Based on the tool output, give your final answer "
+                            "in \\boxed{ANSWER}."
+                        )
+                        text2, _ = _bench_generate(
+                            model, tokenizer, pass2_prompt,
+                            BENCH_TOOL_USE_MAX_TOKENS, device, enable_thinking=False,
+                        )
+                        combined_text = (
+                            text1[:m.end()]
+                            + f"\n<output>{tool_result}</output>\n"
+                            + text2
+                        )
+                    # Score by numeric match, same semantics as math_bench.
+                    pred = _math_extract_answer(combined_text, "math")
+                    ok = _math_score_one(pred, it["gold"])
+                    out["items"].append({
+                        "src": it.get("src", ""),
+                        "tool_used": tool_used,
+                        "tool_result": (tool_result or "")[:120] if tool_used else None,
+                        "pred": pred[:40],
+                        "gold": it["gold"][:40],
+                        "ok": bool(ok),
+                        "tail": combined_text[-160:],
+                    })
+                    out["n"] += 1
+                    out["correct"] += ok
+                except Exception as e:
+                    out["items"].append({"src": it.get("src", ""), "error": str(e)[:120]})
+        if was_training:
+            model.train()
+        out["pass_frac"] = out["correct"] / max(1, out["n"])
+        out["tool_used_count"] = sum(
+            1 for i in out["items"] if isinstance(i, dict) and i.get("tool_used")
+        )
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
+# ── self_consistency_bench (Session 3) ─────────────────────────────────
+
+def self_consistency_bench_probe(model, tokenizer, device="cuda"):
+    """Generate K samples at (T, top_p) per item, majority-vote the
+    extracted answer, compare to gold. Tests whether the student's
+    underlying knowledge is *robust* — single-shot accuracy can be
+    inflated by lucky samples on hard problems, but a model that
+    genuinely knows the answer will output it more often than any
+    distractor across samples.
+
+    Uses a per-(block_seed, question_idx, sample_idx) seed so every
+    validator reproduces the same sample set for a given round.
+    """
+    out = {"n": 0, "correct": 0, "pass_frac": 0.0, "items": []}
+    samples = _BENCH_SAMPLES.get("self_consistency") or []
+    if not samples or model is None or tokenizer is None:
+        return out
+    k_samples = max(1, int(BENCH_SELF_CONSISTENCY_SAMPLES))
+    base_seed = _coerce_block_seed(_BENCH_BLOCK_SEED) or 0
+    base_seed ^= _BENCH_STREAM.get("self_consistency", 0)
+    try:
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            for q_idx, it in enumerate(samples):
+                try:
+                    prompt_text = _math_format_prompt(it["question"], "math500")
+                    votes: dict[str, int] = {}
+                    raw_preds: list[str] = []
+                    for s_idx in range(k_samples):
+                        sample_seed = (base_seed + q_idx * 1024 + s_idx) & 0xFFFFFFFF
+                        text, _ = _bench_generate_sampled(
+                            model, tokenizer, prompt_text,
+                            BENCH_SELF_CONSISTENCY_MAX_TOKENS, device,
+                            temperature=BENCH_SELF_CONSISTENCY_TEMP,
+                            top_p=BENCH_SELF_CONSISTENCY_TOPP,
+                            seed=sample_seed,
+                            enable_thinking=False,
+                        )
+                        pred_raw = _math_extract_answer(text, "math500")
+                        # Canonicalize for voting (strip trailing dots,
+                        # commas, $, leading zeros).
+                        canon = pred_raw.replace(",", "").replace("$", "").strip().rstrip(".")
+                        if canon:
+                            votes[canon] = votes.get(canon, 0) + 1
+                        raw_preds.append(pred_raw[:40])
+                    if not votes:
+                        out["items"].append({
+                            "src": it.get("src", ""),
+                            "ok": False,
+                            "reason": "no_extraction",
+                            "samples": raw_preds,
+                        })
+                        out["n"] += 1
+                        continue
+                    winner, winner_count = max(votes.items(), key=lambda kv: kv[1])
+                    ok = _math_score_one(winner, it["gold"])
+                    out["items"].append({
+                        "src": it.get("src", ""),
+                        "samples": raw_preds,
+                        "vote_winner": winner[:40],
+                        "vote_count": winner_count,
+                        "k": k_samples,
+                        "gold": it["gold"][:40],
+                        "ok": bool(ok),
+                    })
+                    out["n"] += 1
+                    out["correct"] += ok
+                except Exception as e:
+                    out["items"].append({"src": it.get("src", ""), "error": str(e)[:120]})
+        if was_training:
+            model.train()
+        out["pass_frac"] = out["correct"] / max(1, out["n"])
+        out["k_samples"] = k_samples
+        out["temperature"] = BENCH_SELF_CONSISTENCY_TEMP
+        out["top_p"] = BENCH_SELF_CONSISTENCY_TOPP
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
 def run_bench_battery(model, tokenizer, device="cuda"):
-    """Run all five bench probes for one student. Returns a dict keyed
-    by axis name (``math_bench`` / ``code_bench`` / ...). Each value is
-    a dict with ``n``, ``correct``, ``pass_frac``, ``items``, and
-    optional ``error``. Caller stores these under the student's
-    results entry — see the main() student loop.
+    """Run all bench probes for one student. Returns a dict keyed by axis
+    name (``math_bench`` / ``code_bench`` / ... / ``aime_bench`` / etc.).
+    Each value is a dict with ``n``, ``correct``, ``pass_frac``, ``items``,
+    and optional ``error``. Caller stores these under the student's results
+    entry — see the main() student loop.
+
+    Ordering matters: Session 2 (production) probes run first so a probe
+    outage in the Session 3 (shadow) tail can't corrupt the production
+    numbers. Each probe is wrapped so a single failure doesn't abort the
+    battery.
     """
     if not BENCH_BATTERY_ENABLED:
         return {}
     t0 = time.time()
     out: dict[str, dict] = {}
     _probes = (
+        # Session 2 — promoted 2026-04-24, ranking-live.
         ("math_bench", math_bench_probe),
         ("code_bench", code_bench_probe),
         ("reasoning_bench", reasoning_bench_probe),
         ("knowledge_bench", knowledge_bench_probe),
         ("ifeval_bench", ifeval_bench_probe),
+        # Session 3 — shadow, promoted +48h.
+        ("aime_bench", aime_bench_probe),
+        ("mbpp_bench", mbpp_bench_probe),
+        ("tool_use_bench", tool_use_bench_probe),
+        ("self_consistency_bench", self_consistency_bench_probe),
     )
     for name, fn in _probes:
         st = time.time()
@@ -3501,6 +4120,31 @@ def compute_kl_from_sparse(teacher_indices, teacher_values, student_logits,
 # §6  vLLM Server Management
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _teacher_cache_complete(model_name, revision=None):
+    """Return True if HF cache has all the weight files vLLM needs.
+
+    vLLM normally calls huggingface_hub.list_repo_tree on startup to discover
+    which safetensors shards to load. On the free-tier HF token this hits the
+    1000-req/5min quota very fast when the teacher is restarted multiple times
+    per round, and vLLM dies with a 429 before opening any cached weights.
+
+    This check lets us skip that remote call by confirming locally that the
+    safetensors shards are already on disk — if they are, we start vLLM with
+    HF_HUB_OFFLINE=1 and it reads straight from cache.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            model_name,
+            revision=revision if (revision and revision != "main") else None,
+            allow_patterns=["*.safetensors", "*.json", "tokenizer*", "*.txt"],
+            local_files_only=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
 def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=16384, revision=None, tensor_parallel_size=1, _attempt=1):
     """Start vLLM server via subprocess. Returns True on success. Retries once on crash."""
     ensure_disk_space(model_name, threshold=80)
@@ -3508,6 +4152,21 @@ def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=163
     tp_note = f" TP={tensor_parallel_size}" if tensor_parallel_size and tensor_parallel_size > 1 else ""
     print(f"\n[vllm] Starting server for {model_name}{tp_note}..." + (f" (attempt {_attempt})" if _attempt > 1 else ""), flush=True)
     stop_vllm_server()
+
+    # If the weights are cached locally, run vLLM fully offline so it never
+    # calls list_repo_tree / hf_hub_download — this is the actual reason vLLM
+    # dies with 429 under moderate load; the cached weights are fine, it's
+    # just the metadata probe that gets rate-limited.
+    offline_ok = _teacher_cache_complete(model_name, revision)
+    if offline_ok:
+        print(f"[vllm] Weights cached locally — starting vLLM with HF_HUB_OFFLINE=1", flush=True)
+    else:
+        print(f"[vllm] Weights not yet cached — prefetching first (retries on 429)", flush=True)
+        try:
+            prefetch_model(model_name, revision=revision, max_retries=4)
+        except Exception as e:
+            print(f"[vllm] prefetch raised {type(e).__name__}: {e} — continuing with online vLLM start", flush=True)
+        offline_ok = _teacher_cache_complete(model_name, revision)
 
     cmd = [
         "python3", "-m", "vllm.entrypoints.openai.api_server",
@@ -3531,6 +4190,9 @@ def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=163
     log_f = open("/tmp/vllm_teacher.log", "w")
     env = os.environ.copy()
     env["VLLM_ATTENTION_BACKEND"] = "FLASH_ATTN"
+    if offline_ok:
+        env["HF_HUB_OFFLINE"] = "1"
+        env["TRANSFORMERS_OFFLINE"] = "1"
     proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, preexec_fn=os.setsid, env=env)
     Path("/tmp/vllm_teacher.pid").write_text(str(proc.pid))
     print(f"[vllm] PID: {proc.pid}", flush=True)
@@ -3549,15 +4211,22 @@ def start_vllm_server(model_name, gpu_memory_utilization=0.90, max_model_len=163
             pass
         if proc.poll() is not None:
             print(f"[vllm] Died with code {proc.returncode}", flush=True)
+            log_tail = ""
             try:
-                print(Path("/tmp/vllm_teacher.log").read_text()[-1500:], flush=True)
+                log_tail = Path("/tmp/vllm_teacher.log").read_text()[-2000:]
+                print(log_tail, flush=True)
             except Exception:
                 pass
-            if _attempt < 2:
-                print("[vllm] Retrying after cleanup...", flush=True)
+            if _attempt < 3:
                 stop_vllm_server()
-                time.sleep(5)
-                return start_vllm_server(model_name, gpu_memory_utilization, max_model_len, revision, tensor_parallel_size, _attempt=2)
+                # On 429 the HF window is 300s — wait it out, don't hammer.
+                # On anything else, 5s is enough for port cleanup.
+                hit_429 = ("429" in log_tail) or ("rate limit" in log_tail.lower())
+                wait_s = 90 if (hit_429 and _attempt == 1) else (180 if hit_429 else 5)
+                print(f"[vllm] Retrying after cleanup in {wait_s}s (429={hit_429})...", flush=True)
+                time.sleep(wait_s)
+                # Retry will re-check cache and try offline mode again.
+                return start_vllm_server(model_name, gpu_memory_utilization, max_model_len, revision, tensor_parallel_size, _attempt=_attempt + 1)
             return False
         if elapsed % 60 == 0 and elapsed > 0:
             print(f"[vllm] Still starting... ({elapsed}s)", flush=True)

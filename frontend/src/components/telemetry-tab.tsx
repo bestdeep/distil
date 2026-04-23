@@ -27,12 +27,30 @@ interface CompositeAxes {
   adversarial?: number;
   on_policy_rkl?: number;
   judge_probe?: number;
-  // Pareto holistic eval v2 (2026-04-24) — absolute-correctness axes.
+  // Arena v3 Session 2 (PRODUCTION) — absolute-correctness axes.
   math_bench?: number;
   code_bench?: number;
   reasoning_bench?: number;
   knowledge_bench?: number;
   ifeval_bench?: number;
+  // Arena v3 Session 3 (SHADOW → +48h) — capability-extending axes.
+  aime_bench?: number;
+  mbpp_bench?: number;
+  tool_use_bench?: number;
+  self_consistency_bench?: number;
+}
+
+interface ParetoSummary {
+  wins?: string[];
+  losses?: string[];
+  ties?: string[];
+  comparable?: number;
+  n_wins?: number;
+  n_losses?: number;
+  n_ties?: number;
+  margin?: number;
+  pareto_wins?: boolean;
+  reason?: string;
 }
 
 interface Composite {
@@ -44,6 +62,8 @@ interface Composite {
   broken_axes?: string[];
   judge_in_composite?: boolean;
   bench_in_composite?: boolean;
+  arena_v3_in_composite?: boolean;
+  pareto?: ParetoSummary;
 }
 
 interface BenchItem {
@@ -53,6 +73,12 @@ interface BenchItem {
   pred?: string | null;
   gold?: string | null;
   task_id?: string | null;
+  tool_used?: boolean;
+  tool_result?: string | null;
+  samples?: string[];
+  vote_winner?: string;
+  vote_count?: number;
+  k?: number;
 }
 
 interface BenchBlock {
@@ -62,6 +88,10 @@ interface BenchBlock {
   wall_s?: number;
   error?: string;
   items?: BenchItem[];
+  tool_used_count?: number;
+  k_samples?: number;
+  temperature?: number;
+  top_p?: number;
 }
 
 interface RoundResult {
@@ -90,12 +120,17 @@ interface RoundResult {
   judge_normalized?: number;
   judge_n_valid?: number;
   judge_n?: number;
-  // Pareto holistic eval v2 bench axes (shadow until BENCH_AXES_IN_COMPOSITE=1)
+  // Arena v3 Session 2 (PRODUCTION)
   math_bench?: BenchBlock | null;
   code_bench?: BenchBlock | null;
   reasoning_bench?: BenchBlock | null;
   knowledge_bench?: BenchBlock | null;
   ifeval_bench?: BenchBlock | null;
+  // Arena v3 Session 3 (SHADOW)
+  aime_bench?: BenchBlock | null;
+  mbpp_bench?: BenchBlock | null;
+  tool_use_bench?: BenchBlock | null;
+  self_consistency_bench?: BenchBlock | null;
 }
 
 interface RoundDetail {
@@ -488,8 +523,10 @@ export function TelemetryTab() {
                   <th className="pr-2">Cap</th>
                   <th className="pr-2">Len</th>
                   <th className="pr-2">Deg</th>
-                  <th className="pr-2" title="Teacher-as-judge score (shadow). Normalized from 1-5 rubric on 16 rotated prompts per round.">Judge*</th>
-                  <th className="pr-2" title="Pareto holistic eval v2 (2026-04-24) — worst of math/code/reason/know/ifeval absolute-correctness axes. Shadow until BENCH_AXES_IN_COMPOSITE=1.">Bench*</th>
+                  <th className="pr-2" title="Teacher-as-judge score (PROMOTED 2026-04-24). Normalized from 1-5 rubric on 16 rotated prompts per round.">Judge</th>
+                  <th className="pr-2" title="Arena v3 Session 2 (PROMOTED 2026-04-24) — worst of math/code/reason/know/ifeval absolute-correctness axes.">Bench</th>
+                  <th className="pr-2" title="Arena v3 Session 3 (SHADOW, promote +48h) — worst of aime/mbpp/tool_use/self_consistency.">V3*</th>
+                  <th className="pr-2" title="Pareto vs king: W/L/T across all axes (shadow gate).">Pareto*</th>
                   <th className="pr-2">Worst</th>
                   <th className="pr-2">vs King</th>
                 </tr>
@@ -500,7 +537,7 @@ export function TelemetryTab() {
                   const worst = r.composite?.worst;
                   const isDq = r.disqualified === true;
                   const isExpanded = expandedUid === r.uid;
-                  // Worst of the five bench axes (null-aware)
+                  // Worst of Session 2 production bench axes (null-aware)
                   const benchAxisValues = [
                     ax.math_bench,
                     ax.code_bench,
@@ -509,6 +546,15 @@ export function TelemetryTab() {
                     ax.ifeval_bench,
                   ].filter((v): v is number => v != null);
                   const benchWorst = benchAxisValues.length > 0 ? Math.min(...benchAxisValues) : undefined;
+                  // Worst of Session 3 shadow bench axes (null-aware)
+                  const v3AxisValues = [
+                    ax.aime_bench,
+                    ax.mbpp_bench,
+                    ax.tool_use_bench,
+                    ax.self_consistency_bench,
+                  ].filter((v): v is number => v != null);
+                  const v3Worst = v3AxisValues.length > 0 ? Math.min(...v3AxisValues) : undefined;
+                  const pareto = r.composite?.pareto;
                   return (
                     <>
                       <tr
@@ -539,11 +585,32 @@ export function TelemetryTab() {
                           className={`pr-2 tabular-nums ${axisColor(benchWorst)} ${r.composite?.bench_in_composite ? "" : "opacity-70"}`}
                           title={
                             r.composite?.bench_in_composite
-                              ? "Pareto holistic eval v2 — worst of math/code/reason/know/ifeval (live)"
-                              : "Pareto holistic eval v2 — worst of math/code/reason/know/ifeval (SHADOW — not in ranking yet)"
+                              ? "Arena v3 Session 2 — worst of math/code/reason/know/ifeval (live)"
+                              : "Arena v3 Session 2 — worst of math/code/reason/know/ifeval (SHADOW)"
                           }
                         >
                           {benchWorst == null ? "—" : benchWorst.toFixed(2)}
+                        </td>
+                        <td
+                          className={`pr-2 tabular-nums ${axisColor(v3Worst)} ${r.composite?.arena_v3_in_composite ? "" : "opacity-70"}`}
+                          title={
+                            r.composite?.arena_v3_in_composite
+                              ? "Arena v3 Session 3 — worst of aime/mbpp/tool_use/self_consistency (live)"
+                              : "Arena v3 Session 3 — worst of aime/mbpp/tool_use/self_consistency (SHADOW — promote +48h)"
+                          }
+                        >
+                          {v3Worst == null ? "—" : v3Worst.toFixed(2)}
+                        </td>
+                        <td className="pr-2 text-[10px] text-muted-foreground/70" title={pareto?.reason || ""}>
+                          {pareto && pareto.comparable != null && pareto.comparable > 0 ? (
+                            <span>
+                              <span className="text-emerald-400">{pareto.n_wins ?? 0}</span>
+                              <span className="text-muted-foreground/40">/</span>
+                              <span className="text-rose-400">{pareto.n_losses ?? 0}</span>
+                              <span className="text-muted-foreground/40">/</span>
+                              <span className="text-muted-foreground/50">{pareto.n_ties ?? 0}</span>
+                            </span>
+                          ) : r.is_king ? <span className="text-muted-foreground/40">king</span> : "—"}
                         </td>
                         <td className={`pr-2 tabular-nums font-semibold ${axisColor(worst)}`}>
                           {worst == null ? "—" : worst.toFixed(2)}
@@ -554,7 +621,7 @@ export function TelemetryTab() {
                       </tr>
                       {isExpanded && (
                         <tr>
-                          <td colSpan={11} className="pb-2 pl-4 text-muted-foreground/60 bg-card/5">
+                          <td colSpan={13} className="pb-2 pl-4 text-muted-foreground/60 bg-card/5">
                             <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px] py-2">
                               <div>prompts: {r.prompts_scored}/{r.prompts_total}</div>
                               <div>paired: {r.paired_prompts}</div>
@@ -592,11 +659,11 @@ export function TelemetryTab() {
                                 </div>
                               )}
                             </div>
-                            {/* Pareto holistic eval v2 — per-axis breakdown */}
+                            {/* Arena v3 Session 2 — per-axis breakdown */}
                             {(r.math_bench || r.code_bench || r.reasoning_bench || r.knowledge_bench || r.ifeval_bench) && (
                               <div className="mt-1 border-t border-border/10 pt-2">
                                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground/40 mb-1">
-                                  Pareto holistic eval v2 <span className={r.composite?.bench_in_composite ? "text-emerald-400" : "text-amber-400/80"}>
+                                  Arena v3 — absolute correctness <span className={r.composite?.bench_in_composite ? "text-emerald-400" : "text-amber-400/80"}>
                                     {r.composite?.bench_in_composite ? "(live)" : "(shadow)"}
                                   </span>
                                 </div>
@@ -607,6 +674,46 @@ export function TelemetryTab() {
                                   <BenchCell label="know" b={r.knowledge_bench} />
                                   <BenchCell label="ifeval" b={r.ifeval_bench} />
                                 </div>
+                              </div>
+                            )}
+                            {/* Arena v3 Session 3 — shadow axes */}
+                            {(r.aime_bench || r.mbpp_bench || r.tool_use_bench || r.self_consistency_bench) && (
+                              <div className="mt-1 border-t border-border/10 pt-2">
+                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground/40 mb-1">
+                                  Arena v3 — capability extension <span className={r.composite?.arena_v3_in_composite ? "text-emerald-400" : "text-amber-400/80"}>
+                                    {r.composite?.arena_v3_in_composite ? "(live)" : "(shadow, promote +48h)"}
+                                  </span>
+                                </div>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[10px]">
+                                  <BenchCell label="aime" b={r.aime_bench} />
+                                  <BenchCell label="mbpp" b={r.mbpp_bench} />
+                                  <BenchCell label="tool_use" b={r.tool_use_bench} />
+                                  <BenchCell label="self_consistency" b={r.self_consistency_bench} />
+                                </div>
+                              </div>
+                            )}
+                            {pareto && pareto.comparable != null && pareto.comparable > 0 && (
+                              <div className="mt-1 border-t border-border/10 pt-2">
+                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground/40 mb-1">
+                                  Pareto vs king <span className="text-amber-400/80">(shadow)</span>
+                                </div>
+                                <div className="text-[10px] text-muted-foreground/70">
+                                  <span className="text-emerald-400">{pareto.n_wins ?? 0}W</span>
+                                  /<span className="text-rose-400">{pareto.n_losses ?? 0}L</span>
+                                  /<span className="text-muted-foreground/50">{pareto.n_ties ?? 0}T</span>
+                                  <span className="ml-2">across {pareto.comparable} axes</span>
+                                  <span className="ml-2">{pareto.pareto_wins ? "dominates" : (pareto.reason || "no-dominance")}</span>
+                                </div>
+                                {(pareto.wins?.length || pareto.losses?.length) ? (
+                                  <div className="mt-1 text-[10px] space-y-0.5">
+                                    {pareto.wins && pareto.wins.length > 0 && (
+                                      <div className="text-emerald-400/80">wins: {pareto.wins.join(", ")}</div>
+                                    )}
+                                    {pareto.losses && pareto.losses.length > 0 && (
+                                      <div className="text-rose-400/80">losses: {pareto.losses.join(", ")}</div>
+                                    )}
+                                  </div>
+                                ) : null}
                               </div>
                             )}
                           </td>
@@ -624,8 +731,13 @@ export function TelemetryTab() {
               <span className="ml-1">Judge* = teacher-as-judge rubric score (1–5 normalized).</span>
             </div>
             <div>
-              <span className="text-amber-400">Bench*</span> = Pareto holistic eval v2 (2026-04-24): absolute pass-frac on a small rotated sample of GSM8K+MATH-500 (math), HumanEval (code, sandboxed), BBH (reasoning), MMLU-Pro (knowledge), IFEval (instruction-following). Scored against ground truth; click any row to see the per-axis breakdown.
-              <span className="ml-1 text-amber-400">SHADOW</span> for 48h of telemetry, then flips live. Overfitting these axes produces a SOTA model — that&apos;s the point.
+              <span className="text-emerald-400">Judge</span> &amp; <span className="text-emerald-400">Bench</span> = Arena v3 Session 2 (<span className="text-emerald-400">PROMOTED 2026-04-24</span>): teacher-as-judge rubric + absolute pass-frac on rotated samples of GSM8K+MATH-500 (math), HumanEval (code, sandboxed), BBH (reasoning), MMLU-Pro (knowledge), IFEval (instruction-following). Scored against ground truth so overfitting ⇒ SOTA model.
+            </div>
+            <div>
+              <span className="text-amber-400">V3*</span> = Arena v3 Session 3 (<span className="text-amber-400">SHADOW, promote +48h</span>): AIME olympiad math, MBPP+ coding, agentic tool-use (Python calculator), and self-consistency (majority vote over 5 samples at T=0.7). Inspired by Affine Cortex; each points to a genuinely valuable capability where overfitting still yields a useful model.
+            </div>
+            <div>
+              <span className="text-amber-400">Pareto*</span> = soft pareto dominance vs king (wins/losses/ties). A challenger that passes KL but loses on a majority of axes is flagged. Today informational; becomes part of the dethrone gate after the 48h public notice.
             </div>
           </div>
         </div>

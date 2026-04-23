@@ -191,21 +191,40 @@ def _compact_think(tp):
 
 
 def _compact_bench(payload):
-    """Compact representation of a *_bench probe payload for the dashboard."""
+    """Compact representation of a *_bench probe payload for the dashboard.
+
+    Handles Session 2 axes (math/code/reasoning/knowledge/ifeval) plus the
+    Session 3 shadow axes (aime/mbpp/tool_use/self_consistency). The
+    tool_use and self_consistency axes emit extra fields per item, which
+    we surface so the dashboard can show the agentic behavior & vote
+    distributions without needing a second round-trip.
+    """
     if not payload:
         return None
     items = payload.get("items") or []
     compact = []
     for it in items[:12]:
-        compact.append({
+        entry = {
             "src": (it.get("src") or "")[:40],
             "ok": it.get("ok"),
             "reason": (it.get("reason") or "")[:80] if it.get("reason") else None,
             "pred": (str(it.get("pred") or "")[:80]) if it.get("pred") is not None else None,
             "gold": (str(it.get("gold") or "")[:40]) if it.get("gold") is not None else None,
             "task_id": it.get("task_id"),
-        })
-    return {
+        }
+        # Session 3 extras — only populated when relevant.
+        if "tool_used" in it:
+            entry["tool_used"] = bool(it.get("tool_used"))
+            tr = it.get("tool_result")
+            if tr is not None:
+                entry["tool_result"] = (str(tr) or "")[:120]
+        if "samples" in it and "vote_winner" in it:
+            entry["samples"] = it.get("samples")
+            entry["vote_winner"] = it.get("vote_winner")
+            entry["vote_count"] = it.get("vote_count")
+            entry["k"] = it.get("k")
+        compact.append(entry)
+    out = {
         "n": payload.get("n"),
         "correct": payload.get("correct"),
         "pass_frac": payload.get("pass_frac"),
@@ -213,6 +232,14 @@ def _compact_bench(payload):
         "error": payload.get("error"),
         "items": compact,
     }
+    # Session 3 axis-level extras.
+    if payload.get("tool_used_count") is not None:
+        out["tool_used_count"] = payload["tool_used_count"]
+    if payload.get("k_samples") is not None:
+        out["k_samples"] = payload["k_samples"]
+        out["temperature"] = payload.get("temperature")
+        out["top_p"] = payload.get("top_p")
+    return out
 
 
 def _compact_round(h2h, last_eval):
@@ -259,13 +286,20 @@ def _compact_round(h2h, last_eval):
             "judge_normalized": jp.get("normalized"),
             "judge_n_valid": jp.get("n_valid"),
             "judge_n": jp.get("n"),
-            # Pareto holistic eval v2 (2026-04-24) — five absolute-
-            # correctness bench axes (shadow until BENCH_AXES_IN_COMPOSITE=1).
+            # Arena v3 Session 2 (2026-04-24, PRODUCTION) — five
+            # absolute-correctness bench axes drawn from public held-out
+            # benchmarks.
             "math_bench": _compact_bench(s.get("math_bench")),
             "code_bench": _compact_bench(s.get("code_bench")),
             "reasoning_bench": _compact_bench(s.get("reasoning_bench")),
             "knowledge_bench": _compact_bench(s.get("knowledge_bench")),
             "ifeval_bench": _compact_bench(s.get("ifeval_bench")),
+            # Arena v3 Session 3 (2026-04-24, SHADOW → +48h) —
+            # capability-extending axes inspired by Affine Cortex.
+            "aime_bench": _compact_bench(s.get("aime_bench")),
+            "mbpp_bench": _compact_bench(s.get("mbpp_bench")),
+            "tool_use_bench": _compact_bench(s.get("tool_use_bench")),
+            "self_consistency_bench": _compact_bench(s.get("self_consistency_bench")),
         })
     return {
         "block": h2h.get("block"),

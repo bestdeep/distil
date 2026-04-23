@@ -173,20 +173,25 @@ def _composite_dethrone_veto(
         return None
     axes = comp.get("axes") or {}
     # Only report axes that are actually in the active composite —
-    # shadow axes (bench/judge, pre-promotion) may score lower than
-    # the triggering axis but should not be surfaced as the reason.
+    # shadow axes (e.g. Arena v3 Session 3, pre-promotion) may score
+    # lower than the triggering axis but should not be surfaced as the
+    # reason.
     broken_axes = set(comp.get("broken_axes") or [])
     from scripts.validator.composite import (
         AXIS_WEIGHTS as _AX,
         BENCH_AXIS_WEIGHTS as _BX,
+        ARENA_V3_AXIS_WEIGHTS as _V3X,
         JUDGE_AXIS_IN_COMPOSITE as _JIC,
         BENCH_AXES_IN_COMPOSITE as _BIC,
+        ARENA_V3_AXES_IN_COMPOSITE as _V3IC,
     )
     active = set(_AX.keys())
     if _JIC:
         active.add("judge_probe")
     if _BIC:
         active.update(_BX.keys())
+    if _V3IC:
+        active.update(_V3X.keys())
     active.difference_update(broken_axes)
     active_axes = {k: v for k, v in axes.items() if v is not None and k in active}
     worst_axis = min(
@@ -203,6 +208,65 @@ def _composite_dethrone_veto(
         "worst_axis": axis_name or "unknown",
         "worst_value": float(axis_value) if axis_value is not None else 0.0,
         "composite": comp,
+    }
+
+
+def _pareto_dethrone_veto(
+    challenger_model: str | None,
+    king_model: str | None,
+    students_data: dict,
+    king_kl: float | None,
+    king_rkl: float | None,
+) -> dict | None:
+    """Return a veto dict iff the challenger fails the Pareto-dominance gate.
+
+    2026-04-24 (Session 3): secondary dethrone consideration inspired by
+    Affine Cortex — a challenger that beats the king on KL but fails to
+    dominate on a majority of axes is flagged. The gate is
+    shadow-active (``PARETO_DOMINANCE_GATE=0`` by default) so this
+    function returns None in production until the 48h public notice
+    completes and the gate flips. Meanwhile the telemetry / dashboard
+    surface the pareto result so we can verify the gate's expected
+    behavior on real rounds.
+
+    When the gate is active and the challenger has insufficient
+    comparable axes, the veto fails OPEN (returns None). We never want
+    a probe outage to freeze the crown.
+    """
+    from scripts.validator.composite import (
+        PARETO_DOMINANCE_GATE as _PG,
+        compute_axes as _axes,
+        compute_pareto_dominance as _pareto,
+    )
+    if not _PG:
+        return None
+    if not challenger_model or not king_model:
+        return None
+    c_data = students_data.get(challenger_model) or {}
+    k_data = students_data.get(king_model) or {}
+    if not c_data or not k_data:
+        return None
+    try:
+        c_axes = _axes(c_data, king_kl, king_rkl)
+        k_axes = _axes(k_data, king_kl, king_rkl)
+        pareto = _pareto(c_axes, k_axes, include_shadow=True)
+    except Exception as exc:
+        logger.warning(
+            f"[pareto-veto] compute failed for {challenger_model}: {exc}"
+        )
+        return None
+    if pareto.get("pareto_wins"):
+        return None
+    # Insufficient comparable axes → fail open.
+    if pareto.get("reason", "").startswith("insufficient"):
+        return None
+    return {
+        "reason": (
+            f"pareto {pareto['n_wins']}W/{pareto['n_losses']}L/"
+            f"{pareto['n_ties']}T across {pareto['comparable']} axes "
+            f"({pareto['reason']})"
+        ),
+        "pareto": pareto,
     }
 
 
@@ -612,6 +676,23 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
                                 level="warning", state_dir=str(state.state_dir),
                             )
                             continue
+                        # Pareto-dominance gate (SHADOW until +48h notice).
+                        pareto_veto = _pareto_dethrone_veto(
+                            challenger_model, king_model_name,
+                            students_data_early, king_h2h_kl, king_rkl_ref_early,
+                        )
+                        if pareto_veto is not None:
+                            logger.info(
+                                f"UID {uid}: BLOCKED DETHRONE by Pareto gate — "
+                                f"{pareto_veto['reason']} (KL passed: p={p_value:.4f}, "
+                                f"delta={mean_delta:.6f}, KL={challenger_kl:.6f})"
+                            )
+                            log_event(
+                                f"Pareto gate blocked dethrone: UID {uid} "
+                                f"{pareto_veto['reason']}",
+                                level="warning", state_dir=str(state.state_dir),
+                            )
+                            continue
                         logger.info(f"UID {uid} DETHRONED king UID {king_uid}! p={p_value:.6f}, delta={mean_delta:.6f} ({pct_better:.2f}%), t={t_stat:.3f}, n={len(deltas)}, KL={challenger_kl:.6f} < eps={epsilon_threshold:.6f}")
                         dethroners.append({
                             "uid": uid,
@@ -647,6 +728,21 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
                             f"Composite floor blocked dethrone: UID {uid} "
                             f"axis {comp_veto['worst_axis']}={comp_veto['worst_value']:.3f} "
                             f"< {COMPOSITE_DETHRONE_FLOOR} [legacy path]",
+                            level="warning", state_dir=str(state.state_dir),
+                        )
+                        continue
+                    pareto_veto = _pareto_dethrone_veto(
+                        challenger_model, king_model_name,
+                        students_data_early, king_h2h_kl, king_rkl_ref_early,
+                    )
+                    if pareto_veto is not None:
+                        logger.info(
+                            f"UID {uid}: BLOCKED DETHRONE by Pareto gate — "
+                            f"{pareto_veto['reason']} [legacy epsilon path, KL={challenger_kl:.6f}]"
+                        )
+                        log_event(
+                            f"Pareto gate blocked dethrone: UID {uid} "
+                            f"{pareto_veto['reason']} [legacy path]",
                             level="warning", state_dir=str(state.state_dir),
                         )
                         continue
@@ -876,14 +972,18 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
             from scripts.validator.composite import (
                 AXIS_WEIGHTS as _AX,
                 BENCH_AXIS_WEIGHTS as _BX,
+                ARENA_V3_AXIS_WEIGHTS as _V3X,
                 JUDGE_AXIS_IN_COMPOSITE as _JIC,
                 BENCH_AXES_IN_COMPOSITE as _BIC,
+                ARENA_V3_AXES_IN_COMPOSITE as _V3IC,
             )
             _active = set(_AX.keys())
             if _JIC:
                 _active.add("judge_probe")
             if _BIC:
                 _active.update(_BX.keys())
+            if _V3IC:
+                _active.update(_V3X.keys())
             _active.difference_update(broken_axes)
             bad = min(
                 ((k, v) for k, v in axes.items() if v is not None and k in _active),
