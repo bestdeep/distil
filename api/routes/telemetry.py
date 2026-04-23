@@ -318,6 +318,8 @@ def _compact_round(h2h, last_eval):
             "self_consistency_bench": _compact_bench(s.get("self_consistency_bench")),
             # Session 3.1 (2026-04-25, SHADOW) — commonsense science MC.
             "arc_bench": _compact_bench(s.get("arc_bench")),
+            # Session 3.4 (2026-04-25, SHADOW) — TruthfulQA factuality MC.
+            "truthful_bench": _compact_bench(s.get("truthful_bench")),
         })
     return {
         "block": h2h.get("block"),

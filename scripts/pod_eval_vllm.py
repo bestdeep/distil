@@ -2255,6 +2255,11 @@ BENCH_SELF_CONSISTENCY_TOPP = float(os.environ.get("BENCH_SELF_CONSISTENCY_TOPP"
 # 1172-item pool; independent of MMLU so miners can't climb `knowledge_bench`
 # by memorizing one taxonomy.
 BENCH_ARC_PER_ROUND = int(os.environ.get("BENCH_ARC_PER_ROUND", "6"))
+# Session 3.4 (added 2026-04-25): TruthfulQA factual-grounding probe. 817
+# adversarially-designed questions where naive pretraining priors produce
+# confidently-wrong answers ("What happens if you swallow gum?"). Direct
+# hallucination-resistance signal; disjoint from every other bench.
+BENCH_TRUTHFUL_PER_ROUND = int(os.environ.get("BENCH_TRUTHFUL_PER_ROUND", "4"))
 
 # Token budgets.
 BENCH_MATH_MAX_TOKENS = int(os.environ.get("BENCH_MATH_MAX_TOKENS", "384"))
@@ -2268,6 +2273,7 @@ BENCH_TOOL_USE_MAX_TOKENS = int(os.environ.get("BENCH_TOOL_USE_MAX_TOKENS", "320
 BENCH_SELF_CONSISTENCY_MAX_TOKENS = int(os.environ.get("BENCH_SELF_CONSISTENCY_MAX_TOKENS", "512"))
 BENCH_TOOL_USE_SANDBOX_TIMEOUT_S = float(os.environ.get("BENCH_TOOL_USE_SANDBOX_TIMEOUT_S", "4.0"))
 BENCH_ARC_MAX_TOKENS = int(os.environ.get("BENCH_ARC_MAX_TOKENS", "48"))
+BENCH_TRUTHFUL_MAX_TOKENS = int(os.environ.get("BENCH_TRUTHFUL_MAX_TOKENS", "48"))
 
 # Per-bench RNG stream offsets so the axes draw from independent
 # substreams even when given the same block_seed. Hex constants are
@@ -2284,18 +2290,19 @@ _BENCH_STREAM = {
     "tool_use": 0x700101C0,      # Session 3
     "self_consistency": 0x5CC001, # Session 3
     "arc": 0xAC0DE317,            # Session 3.1
+    "truthful": 0x74717A01,       # Session 3.4 — "tqa."
 }
 
 _BENCH_BLOCK_SEED = None
 _BENCH_POOLS: dict[str, list[dict]] = {
     "math": [], "code": [], "reasoning": [], "knowledge": [], "ifeval": [],
     "aime": [], "mbpp": [], "tool_use": [], "self_consistency": [],
-    "arc": [],
+    "arc": [], "truthful": [],
 }
 _BENCH_SAMPLES: dict[str, list[dict]] = {
     "math": [], "code": [], "reasoning": [], "knowledge": [], "ifeval": [],
     "aime": [], "mbpp": [], "tool_use": [], "self_consistency": [],
-    "arc": [],
+    "arc": [], "truthful": [],
 }
 
 
@@ -2637,6 +2644,71 @@ def _bench_load_pools(verbose: bool = True):
         if verbose:
             print(f"[bench] arc-challenge load error: {e}", flush=True)
 
+    # ── truthful_bench: TruthfulQA mc1 (Session 3.4) ────────────────
+    # 817 adversarial factual questions. Each item has K candidate
+    # answers where exactly one is labelled correct (mc1_targets). We
+    # letter the candidates A/B/C/... and extract a single letter from
+    # the model's output, just like ARC/MMLU. K is variable (2-13) so
+    # we cap at 10 options to stay inside the A-J letter regex.
+    #
+    # IMPORTANT: the raw dataset always places the correct answer at
+    # index 0 (verified empirically on 2026-04-25: 817/817 items).
+    # Iterating choices in order would let a model answer "A" on every
+    # item and score 100% without reading the question. We shuffle
+    # choices deterministically using a per-question hash so:
+    #   (a) the correct letter varies across items (anti-gaming),
+    #   (b) the same question always produces the same prompt across
+    #       validators (reproducibility).
+    import hashlib as _hashlib
+    try:
+        tqa = load_dataset("truthful_qa", "multiple_choice", split="validation")
+        for item in tqa:
+            q = item.get("question")
+            mc1 = item.get("mc1_targets") or {}
+            choices = list(mc1.get("choices") or [])
+            labels = list(mc1.get("labels") or [])
+            if not (q and choices and labels) or len(choices) != len(labels):
+                continue
+            correct_idx = None
+            for i, lab in enumerate(labels):
+                if int(lab) == 1:
+                    correct_idx = i
+                    break
+            if correct_idx is None:
+                continue
+            # Cap at 10 options — keep the correct one, sample 9 wrong
+            # deterministically. For items with <=10 options we just
+            # shuffle in place.
+            if len(choices) > 10:
+                correct_text = choices[correct_idx]
+                incorrect = [c for i, c in enumerate(choices) if i != correct_idx]
+                h_wrong = _hashlib.sha256(str(q).encode()).digest()
+                seed_w = int.from_bytes(h_wrong[:8], "big")
+                import random as _rnd
+                _rnd.Random(seed_w).shuffle(incorrect)
+                choices = incorrect[:9] + [correct_text]
+                correct_idx = 9
+            # Deterministic shuffle.
+            h = _hashlib.sha256(str(q).encode()).digest()
+            seed = int.from_bytes(h[8:16], "big")
+            order = list(range(len(choices)))
+            import random as _rnd
+            _rnd.Random(seed).shuffle(order)
+            shuffled_choices = [choices[i] for i in order]
+            shuffled_correct_idx = order.index(correct_idx)
+            letters = "ABCDEFGHIJ"[: len(shuffled_choices)]
+            gold_letter = letters[shuffled_correct_idx]
+            _BENCH_POOLS["truthful"].append({
+                "src": "truthful-qa",
+                "question": str(q),
+                "labels": list(letters),
+                "texts": [str(c) for c in shuffled_choices],
+                "gold_letter": gold_letter,
+            })
+    except Exception as e:
+        if verbose:
+            print(f"[bench] truthful_qa load error: {e}", flush=True)
+
     if verbose:
         print(
             f"[bench] pools loaded: "
@@ -2649,7 +2721,8 @@ def _bench_load_pools(verbose: bool = True):
             f"mbpp={len(_BENCH_POOLS['mbpp'])}, "
             f"tool_use={len(_BENCH_POOLS['tool_use'])}, "
             f"self_consistency={len(_BENCH_POOLS['self_consistency'])}, "
-            f"arc={len(_BENCH_POOLS['arc'])}",
+            f"arc={len(_BENCH_POOLS['arc'])}, "
+            f"truthful={len(_BENCH_POOLS['truthful'])}",
             flush=True,
         )
 
@@ -2732,6 +2805,7 @@ def set_bench_block_seed(block_seed):
         "self_consistency", block_seed, BENCH_SELF_CONSISTENCY_PER_ROUND,
     )
     _BENCH_SAMPLES["arc"] = _pick_bench_items("arc", block_seed, BENCH_ARC_PER_ROUND)
+    _BENCH_SAMPLES["truthful"] = _pick_bench_items("truthful", block_seed, BENCH_TRUTHFUL_PER_ROUND)
     print(
         f"[bench] round samples: math={len(_BENCH_SAMPLES['math'])}, "
         f"code={len(_BENCH_SAMPLES['code'])}, "
@@ -2742,7 +2816,8 @@ def set_bench_block_seed(block_seed):
         f"mbpp={len(_BENCH_SAMPLES['mbpp'])}, "
         f"tool_use={len(_BENCH_SAMPLES['tool_use'])}, "
         f"self_consistency={len(_BENCH_SAMPLES['self_consistency'])}, "
-        f"arc={len(_BENCH_SAMPLES['arc'])}",
+        f"arc={len(_BENCH_SAMPLES['arc'])}, "
+        f"truthful={len(_BENCH_SAMPLES['truthful'])}",
         flush=True,
     )
 
@@ -3719,6 +3794,67 @@ def arc_bench_probe(model, tokenizer, device="cuda"):
     return out
 
 
+# ── truthful_bench (Session 3.4 — adversarial factuality MC) ─────────
+
+def _format_truthful_prompt(item: dict) -> str:
+    """Same letter-MC shape as ARC/MMLU, but the choices are adversarial.
+
+    TruthfulQA intentionally includes attractive-but-wrong answers that
+    match common misconceptions ("What happens if you swallow gum? (A) It
+    stays in your stomach for 7 years … (B) It passes through normally").
+    A model with strong pretraining priors but weak factual grounding
+    will pick the wrong but popularly-believed answer.
+    """
+    lines = [f"({lab}) {txt}" for lab, txt in zip(item["labels"], item["texts"])]
+    opts = "\n".join(lines)
+    return (
+        f"{item['question']}\n\n"
+        f"Options:\n{opts}\n\n"
+        "Respond with only the letter of the correct answer."
+    )
+
+
+def truthful_bench_probe(model, tokenizer, device="cuda"):
+    out = {"n": 0, "correct": 0, "pass_frac": 0.0, "items": []}
+    samples = _BENCH_SAMPLES.get("truthful") or []
+    if not samples or model is None or tokenizer is None:
+        return out
+    try:
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            for it in samples:
+                try:
+                    prompt_text = _format_truthful_prompt(it)
+                    text, tok = _bench_generate(
+                        model, tokenizer, prompt_text,
+                        BENCH_TRUTHFUL_MAX_TOKENS, device, enable_thinking=False,
+                    )
+                    cleaned = _strip_thinking_probe(text or "").strip()
+                    m = _MMLU_LETTER_RE.search(cleaned)
+                    pred = m.group(1).upper() if m else ""
+                    ok = 1 if pred and pred == it["gold_letter"] else 0
+                    out["items"].append({
+                        "src": it.get("src", ""),
+                        "pred": pred,
+                        "gold": it["gold_letter"],
+                        "ok": bool(ok),
+                        "gen_tokens": int(tok),
+                        "tail": text[-120:],
+                    })
+                    out["n"] += 1
+                    out["correct"] += ok
+                except Exception as e:
+                    out["items"].append({"src": it.get("src", ""), "error": str(e)[:120]})
+        if was_training:
+            model.train()
+        out["pass_frac"] = out["correct"] / max(1, out["n"])
+        _bench_finalize_token_stats(out)
+    except Exception as e:
+        out["error"] = str(e)[:200]
+    return out
+
+
 def run_bench_battery(model, tokenizer, device="cuda"):
     """Run all bench probes for one student. Returns a dict keyed by axis
     name (``math_bench`` / ``code_bench`` / ... / ``aime_bench`` / etc.).
@@ -3749,6 +3885,8 @@ def run_bench_battery(model, tokenizer, device="cuda"):
         ("self_consistency_bench", self_consistency_bench_probe),
         # Session 3.1 — shadow, commonsense science.
         ("arc_bench", arc_bench_probe),
+        # Session 3.4 — shadow, adversarial factuality (hallucination resistance).
+        ("truthful_bench", truthful_bench_probe),
     )
     for name, fn in _probes:
         st = time.time()

@@ -100,6 +100,12 @@ All axes are in `[0, 1]`, higher-is-better. Missing axes (e.g. probe outage) are
 |------------------------------|---------------------------------------------------------------------------------------------------------|
 | `chat_turns_probe`           | 6 hand-authored 3-turn dialogues/round. Student generates 3 assistant turns with accumulated context; teacher grades the full transcript on a 1-5 rubric (coherence + consistency + helpfulness). Directly probes deployment-quality multi-turn dialogue — a capability pure climbmix-KL distillation does NOT reward. |
 
+**Arena v3 Session 3.4 — SHADOW, added 2026-04-25 (adversarial factuality):**
+
+| Axis                         | What it tests                                                                                           |
+|------------------------------|---------------------------------------------------------------------------------------------------------|
+| `truthful_bench`             | TruthfulQA mc1 (~817 items), 4/round. Adversarial factual questions where the popularly-believed-but-wrong answer is included as a tempting distractor. Tests hallucination resistance. Correct letter is deterministically shuffled per item so a model can't win by always answering "A". |
+
 All bench pools rotate per-round via `block_seed`, so every validator picks the same items but items differ between rounds (anti-memorization).
 
 ### Dethrone gates (all must pass)
@@ -131,6 +137,7 @@ The fastest way to climb Arena v3 is to broaden your distillation data mix so th
 | `arc_bench`                  | Science MC (grade-school to middle-school). AI2 ARC-Challenge train + Easy splits make strong pretraining data; anything teaching MC letter outputs (A/B/C/D) generalizes. |
 | `reasoning_density`          | Train your model to emit short correct answers on trivia and medium-length on reasoning. Use the teacher's own output length as the target (the `RD_*_TARGET` values). Long-CoT on `knowledge_bench` or `arc_bench` is strictly worse than short-CoT. |
 | `chat_turns_probe`           | Multi-turn SFT (OpenAssistant Conversations, ShareGPT, UltraChat, LMSYS-chat-1M). Teach the model to reference its own earlier turns when asked ("based on your last answer…"). A model that resets context every turn will score ~2/5. |
+| `truthful_bench`             | Hallucination-resistance data: TriviaQA-factual (short, gold-referenced answers), RefuseElseFalse, HaluEval-sft, the TruthfulQA train split (CC-BY). Teach the model to prefer precise short factual answers over confident-sounding prose. Avoid training data with speculative "facts" that aren't in the teacher's cutoff. |
 
 **Two anti-patterns to avoid:**
 
@@ -212,7 +219,7 @@ All endpoints are on `api.arbos.life`.
 | Dethronement threshold | paired t-test, p < 0.03 AND worst-axis ≥ 0.20 |
 | Composite version | Arena v3 (shadow v7) |
 | Live axes | kl, on_policy_rkl, capability, length, degeneracy, judge_probe, math_bench, code_bench, reasoning_bench, knowledge_bench, ifeval_bench |
-| Shadow axes (live 2026-04-26) | aime_bench, mbpp_bench, tool_use_bench, self_consistency_bench, arc_bench, reasoning_density, chat_turns_probe, pareto_dominance |
+| Shadow axes (live 2026-04-26) | aime_bench, mbpp_bench, tool_use_bench, self_consistency_bench, arc_bench, truthful_bench, reasoning_density, chat_turns_probe, pareto_dominance |
 | Top-N always included | 5 |
 | Dataset (distillation) | `karpathy/climbmix-400b-shuffle` |
 | Reference baseline | `Qwen/Qwen3.5-4B` (UID -1) |
