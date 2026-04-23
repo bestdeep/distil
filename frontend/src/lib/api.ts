@@ -219,6 +219,56 @@ export async function fetchAllModelInfo(models: string[]): Promise<Record<string
   return results;
 }
 
+export interface H2hCompositeAxes {
+  kl?: number;
+  capability?: number;
+  length?: number;
+  degeneracy?: number;
+  on_policy_rkl?: number;
+  judge_probe?: number;
+  math_bench?: number;
+  code_bench?: number;
+  reasoning_bench?: number;
+  knowledge_bench?: number;
+  ifeval_bench?: number;
+  aime_bench?: number;
+  mbpp_bench?: number;
+  tool_use_bench?: number;
+  self_consistency_bench?: number;
+  arc_bench?: number;
+  reasoning_density?: number;
+  chat_turns_probe?: number;
+}
+
+export interface H2hComposite {
+  version?: string | null;
+  axes?: H2hCompositeAxes;
+  worst?: number | null;
+  weighted?: number | null;
+  present_count?: number;
+  broken_axes?: string[] | null;
+  judge_in_composite?: boolean;
+  bench_in_composite?: boolean;
+  arena_v3_in_composite?: boolean;
+  axis_spread?: number | null;
+  bench_vs_rel_gap?: number | null;
+  reasoning_density_in_composite?: boolean;
+  chat_turns_in_composite?: boolean;
+  pareto?: {
+    wins?: string[];
+    losses?: string[];
+    ties?: string[];
+    n_wins?: number;
+    n_losses?: number;
+    n_ties?: number;
+    comparable?: number;
+    pareto_wins?: boolean;
+    margin?: number | null;
+    min_comparable?: number | null;
+    reason?: string;
+  } | null;
+}
+
 export interface H2hResult {
   uid?: number;
   model: string;
@@ -232,6 +282,7 @@ export interface H2hResult {
   early_stopped?: boolean;
   disqualified?: boolean;
   dq_reason?: string;
+  composite?: H2hComposite | null;
   t_test?: {
     p?: number;
     t?: number;
