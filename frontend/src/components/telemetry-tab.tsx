@@ -60,6 +60,12 @@ interface Composite {
   axes?: CompositeAxes;
   worst?: number;
   weighted?: number;
+  /** Stdev of ALL axis values this round. Balanced student: low. Narrow
+   * specialist (games one axis): high. Informational — not a gate. */
+  axis_spread?: number;
+  /** mean(bench axes) - mean(relative axes). A model that memorized rotation
+   * items would be high here. Normal miners: ~0. Flag for operators. */
+  bench_vs_rel_gap?: number;
   present_count?: number;
   broken_axes?: string[];
   judge_in_composite?: boolean;
@@ -720,6 +726,30 @@ export function TelemetryTab() {
                                     )}
                                   </div>
                                 ) : null}
+                              </div>
+                            )}
+                            {/* 2026-04-25 — balance badges (informational, not gating). */}
+                            {(r.composite?.axis_spread != null || r.composite?.bench_vs_rel_gap != null) && (
+                              <div className="mt-1 border-t border-border/10 pt-2">
+                                <div className="text-[10px] uppercase tracking-wider text-muted-foreground/40 mb-1">
+                                  Balance (informational)
+                                </div>
+                                <div className="text-[10px] text-muted-foreground/70 flex flex-wrap gap-x-3 gap-y-0.5">
+                                  {r.composite?.axis_spread != null && (
+                                    <span title="stdev of all present axis values. Balanced ≈ 0.05, narrow specialist ≥ 0.15.">
+                                      spread=<span className={(r.composite.axis_spread ?? 0) >= 0.15 ? "text-amber-400" : "text-foreground/60"}>
+                                        {r.composite.axis_spread.toFixed(2)}
+                                      </span>
+                                    </span>
+                                  )}
+                                  {r.composite?.bench_vs_rel_gap != null && (
+                                    <span title="mean(bench axes) − mean(relative axes). Positive gap > 0.20 may indicate rotation-memorization without policy-level improvement.">
+                                      bench−rel=<span className={(r.composite.bench_vs_rel_gap ?? 0) >= 0.20 ? "text-amber-400" : "text-foreground/60"}>
+                                        {r.composite.bench_vs_rel_gap >= 0 ? "+" : ""}{r.composite.bench_vs_rel_gap.toFixed(2)}
+                                      </span>
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             )}
                           </td>

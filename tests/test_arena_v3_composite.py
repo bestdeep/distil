@@ -395,5 +395,73 @@ class TestAnnotateH2HWithPareto(unittest.TestCase):
         self.assertGreater(pareto["comparable"], 3)
 
 
+class TestAxisSummaryStats(unittest.TestCase):
+    """Informational balance scores (2026-04-25, non-gating)."""
+
+    def test_spread_low_for_balanced_student(self):
+        from scripts.validator.composite import compute_composite
+        student = _make_student(
+            kl=0.10, rkl=0.10, cap_frac=0.85,
+            bench={
+                "math_bench": 0.80, "code_bench": 0.80,
+                "reasoning_bench": 0.80, "knowledge_bench": 0.80,
+                "ifeval_bench": 0.80,
+            },
+        )
+        comp = compute_composite(student, king_kl=0.10, king_rkl=0.10)
+        self.assertIsNotNone(comp["axis_spread"])
+        self.assertLess(comp["axis_spread"], 0.15,
+            "balanced student should have low axis spread")
+
+    def test_spread_high_for_narrow_specialist(self):
+        from scripts.validator.composite import compute_composite
+        # Huge gap between bench axes (rotation-memorized) and relative axes
+        # (never learned).
+        student = _make_student(
+            kl=1.0, rkl=1.5, cap_frac=0.2,
+            bench={
+                "math_bench": 1.00, "code_bench": 1.00,
+                "reasoning_bench": 1.00, "knowledge_bench": 1.00,
+                "ifeval_bench": 1.00,
+            },
+        )
+        comp = compute_composite(student, king_kl=1.0, king_rkl=1.0)
+        self.assertGreater(comp["axis_spread"], 0.20,
+            "narrow specialist (all bench high, cap low) should have wide spread")
+
+    def test_bench_vs_rel_gap_positive_when_bench_high(self):
+        from scripts.validator.composite import compute_composite
+        student = _make_student(
+            kl=0.5, rkl=1.0, cap_frac=0.3,  # rel axes much worse than king
+            bench={
+                "math_bench": 0.95, "code_bench": 0.95,  # bench axes high
+                "reasoning_bench": 0.95, "knowledge_bench": 0.95,
+                "ifeval_bench": 0.95,
+            },
+        )
+        # King has low KL/RKL, so this student normalizes poorly on rel axes.
+        comp = compute_composite(student, king_kl=0.1, king_rkl=0.1)
+        self.assertIsNotNone(comp["bench_vs_rel_gap"])
+        self.assertGreater(comp["bench_vs_rel_gap"], 0.10,
+            "bench >> rel should show a positive gap (potential rotation-memorization)")
+
+    def test_bench_vs_rel_gap_near_zero_for_balanced(self):
+        from scripts.validator.composite import compute_composite
+        student = _make_student(
+            kl=0.1, rkl=0.1, cap_frac=0.85,
+            bench={
+                "math_bench": 0.75, "code_bench": 0.80,
+                "reasoning_bench": 0.78, "knowledge_bench": 0.76,
+                "ifeval_bench": 0.77,
+            },
+        )
+        comp = compute_composite(student, king_kl=0.1, king_rkl=0.1)
+        # rel mean ~0.95 (all axes at 1.0 except capability=0.85/1.0=0.944)
+        # bench mean ~0.77 → gap ≈ -0.18
+        self.assertIsNotNone(comp["bench_vs_rel_gap"])
+        self.assertLess(abs(comp["bench_vs_rel_gap"]), 0.30,
+            "balanced student shouldn't show suspiciously large gap")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

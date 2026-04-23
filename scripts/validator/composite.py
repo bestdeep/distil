@@ -534,11 +534,45 @@ def compute_composite(student: dict, king_kl: float | None = None,
     worst = min(ranked.values())
     total_w = sum(effective_weights[k] for k in ranked)
     weighted = sum(effective_weights[k] * v for k, v in ranked.items()) / total_w if total_w else None
+
+    # 2026-04-25 — anti-gaming visibility. Two informational scores that
+    # tell operators when a student is unusually narrow:
+    #
+    #   * ``axis_spread``: stdev of all axis values present in the round
+    #     (whether they're in the composite or not). A balanced student
+    #     has low spread (~0.05); a specialist who games one axis has
+    #     spread > 0.15. Not used for gating — the worst-axis rule
+    #     already captures specialist failure, this just makes narrow
+    #     profiles visible earlier.
+    #
+    #   * ``bench_vs_rel_gap``: mean(bench pass-fracs) minus mean(relative
+    #     axes). A miner who memorized bench items via rotation
+    #     inspection without improving policy-level capability shows up
+    #     as a big positive gap. Normal miners: roughly zero. Flagged
+    #     in telemetry so we can audit rotation-memorization attempts
+    #     before they matter.
+    all_values = [v for v in axes.values() if v is not None]
+    axis_spread = None
+    if len(all_values) >= 2:
+        m = sum(all_values) / len(all_values)
+        var = sum((v - m) ** 2 for v in all_values) / len(all_values)
+        axis_spread = var ** 0.5
+
+    rel_keys = ("kl", "on_policy_rkl", "capability", "judge_probe", "length", "degeneracy")
+    bench_keys = tuple(BENCH_AXIS_WEIGHTS.keys()) + tuple(ARENA_V3_AXIS_WEIGHTS.keys())
+    rel_vals = [axes[k] for k in rel_keys if axes.get(k) is not None]
+    bench_vals = [axes[k] for k in bench_keys if axes.get(k) is not None]
+    bench_vs_rel_gap = None
+    if len(rel_vals) >= 2 and len(bench_vals) >= 2:
+        bench_vs_rel_gap = (sum(bench_vals) / len(bench_vals)) - (sum(rel_vals) / len(rel_vals))
+
     return {
         "version": COMPOSITE_SHADOW_VERSION,
         "axes": {k: (round(v, 4) if v is not None else None) for k, v in axes.items()},
         "worst": round(worst, 4),
         "weighted": round(weighted, 4) if weighted is not None else None,
+        "axis_spread": round(axis_spread, 4) if axis_spread is not None else None,
+        "bench_vs_rel_gap": round(bench_vs_rel_gap, 4) if bench_vs_rel_gap is not None else None,
         "present_count": len(ranked),
         "broken_axes": sorted(broken_axes) if broken_axes else [],
         "judge_in_composite": JUDGE_AXIS_IN_COMPOSITE,
