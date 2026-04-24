@@ -318,7 +318,7 @@ def run_eval_on_pod(pod: PodManager, models_to_eval: dict, king_uid, n_prompts: 
     poll_thread = threading.Thread(target=poll_pod_progress, daemon=True)
     poll_thread.start()
     n_eval_models = len(models_to_eval)
-    eval_timeout = 2 * 60 * 60
+    eval_timeout = 5 * 60 * 60
     logger.info(f"Running eval ({n_eval_models} models, {n_prompts} prompts, timeout={eval_timeout // 60}m)")
     log_event(f"Running eval on pod: king vs {n_eval_models - 1} challengers, {n_prompts} prompts", state_dir=str(state.state_dir))
     eval_env = {"HF_TOKEN": os.environ.get("HF_TOKEN", ""), "TOKENIZERS_PARALLELISM": "false"}
