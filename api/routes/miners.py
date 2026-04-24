@@ -256,8 +256,30 @@ def get_miner(uid: int):
     ]
     result["h2h_history"] = relevant
 
+    # Composite axes (Arena v3) — per miner request from #distil-97 on
+    # 2026-04-24: miners want to see their per-axis scores without parsing
+    # /api/eval-data. Pull the latest matching entry straight from
+    # h2h_latest.results, which ``annotate_h2h_with_composite`` stamps
+    # every round.
+    composite_entry = None
+    for r in (latest.get("results") or []):
+        if r.get("uid") == uid and r.get("composite"):
+            composite_entry = r["composite"]
+            break
+    if composite_entry:
+        result["composite"] = {
+            "worst": composite_entry.get("worst"),
+            "weighted": composite_entry.get("weighted"),
+            "axes": composite_entry.get("axes", {}),
+            "present_count": composite_entry.get("present_count"),
+            "version": composite_entry.get("version"),
+            "round_block": latest.get("block"),
+        }
+    else:
+        result["composite"] = None
+
     return JSONResponse(
-        content=result,
+        content=_sanitize_floats(result),
         headers={"Cache-Control": "public, max-age=10, stale-while-revalidate=30"},
     )
 

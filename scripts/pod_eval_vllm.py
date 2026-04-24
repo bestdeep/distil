@@ -6295,7 +6295,19 @@ def main():
     best_kl_so_far = None
     best_kl_per_prompt_cumulative = None
     MIN_PROMPTS_EARLY_STOP = args.early_stop_min if args.early_stop_min > 0 else len(prompts) + 1
-    PER_MODEL_TIMEOUT = 600
+    # Per-model scoring timeout. Was hardcoded at 600s, which is fine when
+    # vLLM is serving the student too, but with the HF-scoring path we
+    # actually use (student forward pass in this process), a 4B model on a
+    # B200 at ~3-4s/prompt can only reach ~150 of the 253 valid prompts in
+    # 600s. That caused every-round early_stopped at mismatched prompt
+    # counts, which breaks the paired KL t-test. Default bumped to 1500s
+    # (25 min) so a typical 4B model on HF can complete the full 253
+    # prompts, and made configurable so we can tune without redeploying.
+    PER_MODEL_TIMEOUT = int(os.environ.get("POD_PER_MODEL_TIMEOUT", "1500"))
+    # When the king (student_idx=0) hits its limit at N prompts, we cap
+    # every subsequent challenger to at most N so every paired comparison
+    # has the exact same number of matched pairs. Fairness > throughput.
+    king_prompts_done = None
 
     # King stays in VRAM
     king_model = None
@@ -6787,10 +6799,22 @@ def main():
         prompt_kl_means = []
         scoring_error = None
         early_stopped = False
+        early_stop_reason = None  # "timeout" | "statistical" | "king_cap" | "nan_kl" | "oom" | "runtime" | "scoring_error"
+
+        # Cap challengers to king's effective prompt count (matched pairs
+        # for the paired t-test). Only applies when king was itself
+        # early-stopped short of the full prompt list.
+        effective_total = len(prompts)
+        if (
+            student_idx > 0
+            and king_prompts_done is not None
+            and king_prompts_done < effective_total
+        ):
+            effective_total = king_prompts_done
 
         t0 = time.time()
         with torch.no_grad():
-            for i in range(len(prompts)):
+            for i in range(effective_total):
                 try:
                     full_seq = full_sequences[i]
                     prompt_len = prompt_lens[i]
@@ -6873,6 +6897,7 @@ def main():
                     if math.isnan(kl_mean) or math.isinf(kl_mean):
                         print(f"  [prompt {i}] KL={kl_mean} — invalid, stopping", flush=True)
                         scoring_error = f"NaN/Inf KL at prompt {i}"
+                        early_stop_reason = "nan_kl"
                         break
 
                     prompt_result = {"mean": round(kl_mean, 6)}
@@ -6885,26 +6910,42 @@ def main():
                     live_progress["phase"] = "scoring"
                     live_progress["current"] = {
                         "student_name": student_name, "student_idx": student_idx,
-                        "prompts_done": i + 1, "prompts_total": len(prompts),
+                        "prompts_done": i + 1, "prompts_total": effective_total,
                         "kl_running_mean": round(running_mean, 6),
                         "best_kl_so_far": round(best_kl_so_far, 6) if best_kl_so_far else None,
                     }
                     _write_progress()
 
                     if (i + 1) % 10 == 0:
-                        print(f"  [{i+1}/{len(prompts)}] KL={kl_mean:.6f} (avg: {running_mean:.6f})", flush=True)
+                        print(
+                            f"  [{i+1}/{effective_total}] KL={kl_mean:.6f} "
+                            f"(avg: {running_mean:.6f})",
+                            flush=True,
+                        )
 
                 except RuntimeError as e:
                     scoring_error = str(e)
                     if "out of memory" in str(e).lower():
-                        print(f"  [prompt {i}] OOM", flush=True)
+                        print(
+                            f"  [prompt {i}] OOM after {time.time()-model_start:.0f}s: {e}",
+                            flush=True,
+                        )
+                        early_stop_reason = "oom"
                     else:
-                        print(f"  [prompt {i}] RuntimeError: {e}", flush=True)
+                        print(
+                            f"  [prompt {i}] RuntimeError after {time.time()-model_start:.0f}s: {e}",
+                            flush=True,
+                        )
+                        early_stop_reason = "runtime"
                     free_gpu()
                     break
                 except Exception as e:
                     scoring_error = str(e)
-                    print(f"  [prompt {i}] Error: {e}", flush=True)
+                    print(
+                        f"  [prompt {i}] {type(e).__name__} after {time.time()-model_start:.0f}s: {e}",
+                        flush=True,
+                    )
+                    early_stop_reason = "scoring_error"
                     free_gpu()
                     break
 
@@ -6924,14 +6965,42 @@ def main():
                         best_at_n = best_kl_so_far if best_kl_so_far and best_kl_so_far > 0.001 else float('inf')
 
                     if student_lower > best_at_n:
-                        print(f"  [early stop] prompt {n}: CI lower {student_lower:.6f} > best@{n} {best_at_n:.6f}", flush=True)
+                        print(
+                            f"  [early stop] reason=statistical prompt={n} "
+                            f"ci_lower={student_lower:.6f} best@{n}={best_at_n:.6f} "
+                            f"elapsed={time.time()-model_start:.0f}s",
+                            flush=True,
+                        )
                         early_stopped = True
+                        early_stop_reason = "statistical"
                         break
 
                 if time.time() - model_start > PER_MODEL_TIMEOUT:
-                    print(f"  [timeout] {PER_MODEL_TIMEOUT}s", flush=True)
+                    print(
+                        f"  [early stop] reason=timeout after={PER_MODEL_TIMEOUT}s "
+                        f"prompt={i+1}/{effective_total}",
+                        flush=True,
+                    )
                     early_stopped = True
+                    early_stop_reason = "timeout"
                     break
+
+            # Loop finished without hitting a break — we scored every
+            # effective prompt. Two cases:
+            #   1. effective_total == len(prompts): full scored run
+            #   2. effective_total < len(prompts): king_cap was active,
+            #      which is a deliberate truncation (not a failure).
+            # We flag king_cap in early_stop_reason for observability but
+            # DO NOT set early_stopped=True — status will be "scored" and
+            # all prompts will count toward dethronement.
+            else:
+                if effective_total < len(prompts):
+                    early_stop_reason = "king_cap"
+                    print(
+                        f"  [king_cap] completed {effective_total}/{len(prompts)} "
+                        f"prompts (capped to king's {king_prompts_done})",
+                        flush=True,
+                    )
 
         scoring_time = time.time() - t0
 
@@ -6961,9 +7030,12 @@ def main():
                 "kl_global_avg": round(kl_avg, 6),
                 "kl_per_prompt": [d["mean"] for d in kl_per_prompt],
                 "prompts_scored": n_scored,
+                "effective_total": effective_total,
+                "prompts_total": len(prompts),
                 "scoring_time": round(scoring_time, 1),
                 "load_time": round(load_time, 1),
                 "early_stopped": early_stopped,
+                "early_stop_reason": early_stop_reason,
             }
             if topk_aggs:
                 student_result["shadow_topk"] = topk_aggs
@@ -7091,6 +7163,16 @@ def main():
                         best_kl_per_prompt_cumulative.append(s / (j + 1))
                     print(f"  → New best: KL={kl_avg:.6f}", flush=True)
 
+            # Capture king_prompts_done so every subsequent challenger is
+            # capped to the same prompt count — prevents the mismatched-
+            # pair paired-t-test breakage we hit on Apr 24.
+            if is_king and king_prompts_done is None and n_scored > 0:
+                king_prompts_done = n_scored
+                print(
+                    f"  [king cap] subsequent challengers capped to {king_prompts_done} prompts",
+                    flush=True,
+                )
+
         # Save incremental
         results["timings"] = {k: round(v, 1) for k, v in timings.items()}
         with open(args.output, "w") as f:
@@ -7101,6 +7183,8 @@ def main():
             "status": results["students"].get(student_name, {}).get("status", "unknown"),
             "kl": results["students"].get(student_name, {}).get("kl_global_avg"),
             "prompts_scored": len(kl_per_prompt),
+            "prompts_total": effective_total,
+            "early_stop_reason": early_stop_reason,
         })
         live_progress["current"] = None
         _write_progress()
