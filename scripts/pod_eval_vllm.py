@@ -6840,7 +6840,9 @@ def main():
                         ),
                     }
                     short = axis_name.replace("_bench", "")
-                    if payload.get("error"):
+                    if payload.get("_skipped"):
+                        summary_bits.append(f"{short}=SKIP")
+                    elif payload.get("error"):
                         summary_bits.append(f"{short}=ERR")
                     elif payload.get("n", 0) > 0:
                         summary_bits.append(
