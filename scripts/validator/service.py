@@ -554,10 +554,14 @@ def plan_round(valid_models, state, king_uid, king_kl, epoch_count,
     top5_only = not has_new and len(challengers) > 0
     if top5_only:
         log_event(
-            f"Top-5 only round: {len(challengers)} contender(s), no new P1/P3",
+            f"Maintenance round: {len(challengers)} contender(s), "
+            f"no new P1/P3 (leaderboard + dormant rotation only)",
             state_dir=state_dir,
         )
-        logger.info(f"Running top-5-only round with {len(challengers)} contender(s)")
+        logger.info(
+            f"Running maintenance round with {len(challengers)} contender(s) "
+            f"(no new submissions, top-N + dormant rotation active)"
+        )
 
     models_to_eval: dict = {}
     if not is_full_eval and king_uid is not None and king_uid in valid_models:
