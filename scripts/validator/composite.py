@@ -264,6 +264,30 @@ PARETO_DOMINANCE_MARGIN = float(os.environ.get("PARETO_DOMINANCE_MARGIN", "0.02"
 PARETO_DOMINANCE_MIN_COMPARABLE = int(os.environ.get("PARETO_DOMINANCE_MIN_COMPARABLE", "5"))
 PARETO_DOMINANCE_GATE = os.environ.get("PARETO_DOMINANCE_GATE", "0") != "0"
 
+# ── King regression health (2026-04-24, SHADOW) ──────────────────────────
+# leeroyjkin (distil-97, 2026-04-24): "Why is the king safe when it scores
+# poorly on your axis test, in fact worse than the base model?" The
+# composite-as-veto gate blocks a challenger from *taking* the crown, but
+# nothing forces the king to *defend* its composite. A king can camp the
+# crown while its bench axes regress to the base-model floor because only
+# KL is used for re-promotion.
+#
+# Minimal fix (shadow-first): compute a ``king_health`` summary each round
+# and stamp it on the king's composite row. Two flags:
+#   * ``below_floor``     — king's worst axis < KING_COMPOSITE_FLOOR
+#   * ``worse_than_base`` — king's worst axis < base model's worst axis
+# Consecutive at-risk rounds accumulate in ``state.king_regression_streak``
+# (per king_uid). Dashboard + /api/miner/{uid} surface the streak so
+# miners and spectators can see it; dethronement remains KL-only until we
+# have ≥1 week of telemetry validating the floor choice.
+#
+# When ``KING_REGRESSION_GATE=1`` and streak ≥ ``KING_REGRESSION_MIN_STREAK``,
+# the king is force-dethroned in favor of the highest-composite challenger
+# in the current round that also passed the structural gates.
+KING_COMPOSITE_FLOOR = float(os.environ.get("KING_COMPOSITE_FLOOR", "0.20"))
+KING_REGRESSION_MIN_STREAK = int(os.environ.get("KING_REGRESSION_MIN_STREAK", "3"))
+KING_REGRESSION_GATE = os.environ.get("KING_REGRESSION_GATE", "0") != "0"
+
 # ── Teacher sanity gate (2026-04-23) ──────────────────────────────────────
 # For each ranking axis we can optionally compute the axis value for the
 # teacher itself (scored as if it were a student). If the teacher's axis
@@ -908,9 +932,63 @@ def _resolve_king_rkl(king_kl: float | None,
     return None
 
 
+def compute_king_health(
+    king_composite: dict | None,
+    base_composite: dict | None,
+) -> dict | None:
+    """Summarize the king's composite health vs floor + base model.
+
+    Shadow telemetry for the leeroyjkin/distil-97 feedback (2026-04-24).
+    Two signals:
+      * ``below_floor``     — worst axis < KING_COMPOSITE_FLOOR
+      * ``worse_than_base`` — worst axis < base model's worst axis
+                              (the base model is always in every round as
+                              a reference anchor, so this is the most
+                              direct "is the king regressing?" check)
+
+    Returns None when either composite is missing or has no populated
+    axes — fail open, never block on noisy probe data.
+    """
+    if not king_composite or king_composite.get("worst") is None:
+        return None
+    king_worst = float(king_composite["worst"])
+    king_axes = king_composite.get("axes") or {}
+    king_worst_axis = min(
+        ((k, v) for k, v in king_axes.items() if v is not None),
+        key=lambda kv: kv[1],
+        default=(None, None),
+    )[0]
+    base_worst: float | None = None
+    base_worst_axis: str | None = None
+    if base_composite and base_composite.get("worst") is not None:
+        base_worst = float(base_composite["worst"])
+        base_axes = base_composite.get("axes") or {}
+        base_worst_axis = min(
+            ((k, v) for k, v in base_axes.items() if v is not None),
+            key=lambda kv: kv[1],
+            default=(None, None),
+        )[0]
+    below_floor = king_worst < KING_COMPOSITE_FLOOR
+    worse_than_base = base_worst is not None and king_worst < base_worst
+    return {
+        "king_worst": king_worst,
+        "king_worst_axis": king_worst_axis,
+        "base_worst": base_worst,
+        "base_worst_axis": base_worst_axis,
+        "floor": KING_COMPOSITE_FLOOR,
+        "below_floor": below_floor,
+        "worse_than_base": worse_than_base,
+        "at_risk": bool(below_floor or worse_than_base),
+        "gate_active": KING_REGRESSION_GATE,
+        "min_streak": KING_REGRESSION_MIN_STREAK,
+    }
+
+
 def annotate_h2h_with_composite(h2h_results: list[dict], king_kl: float | None,
                                 students_data: dict[Any, dict],
-                                teacher_student_row: dict | None = None) -> None:
+                                teacher_student_row: dict | None = None,
+                                reference_model: str | None = None,
+                                reference_uid: Any = None) -> None:
     """Mutates h2h_results in place to add ``composite`` per entry.
 
     ``students_data`` maps model_name -> the raw per-student dict from
@@ -963,3 +1041,27 @@ def annotate_h2h_with_composite(h2h_results: list[dict], king_kl: float | None,
                 challenger_raw_axes, king_raw_axes, include_shadow=True,
             )
         entry["composite"] = comp
+
+    # ── King health (2026-04-24 shadow) ─────────────────────────────
+    # Stamp ``composite.king_health`` on the king's row with a worst-axis
+    # summary vs floor + base model. Shadow only — state_manager tracks
+    # the consecutive streak; dashboard + /api/miner/{uid} surface it.
+    # When the gate is off (default), this is pure telemetry.
+    # Callers pass in the reference model/UID so this module stays
+    # ML-dep free (see module docstring).
+    try:
+        king_comp = king_entry["composite"] if king_entry and "composite" in king_entry else None
+        base_entry = None
+        if reference_uid is not None or reference_model is not None:
+            base_entry = next(
+                (r for r in h2h_results
+                 if (reference_uid is not None and r.get("uid") == reference_uid)
+                 or (reference_model is not None and r.get("model") == reference_model)),
+                None,
+            )
+        base_comp = base_entry.get("composite") if base_entry else None
+        health = compute_king_health(king_comp, base_comp)
+        if health and king_comp is not None:
+            king_comp["king_health"] = health
+    except Exception:
+        pass  # telemetry failure must never break ranking

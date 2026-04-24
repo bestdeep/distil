@@ -2234,6 +2234,26 @@ def _render_chat_prompt(tokenizer, user_text: str, enable_thinking: bool = False
 
 BENCH_BATTERY_ENABLED = os.environ.get("BENCH_BATTERY_ENABLED", "1") != "0"
 
+# 2026-04-24 — `leeroyjkin` on distil-97 flagged the bench battery as the
+# new bottleneck after the teacher-gen GIL fix (379s/student × 14 ≈ 88 min
+# extra on B200). The full battery runs 12 probes; shadow axes alone are
+# 7 of those. Two configurable knobs:
+#   * BENCH_BATTERY_SHADOW_AXES=0  → skip Session 3 (aime/mbpp/tool_use/
+#                                    self_consistency/arc/truthful/long_context).
+#                                    Keeps Session 2 (math/code/reasoning/
+#                                    knowledge/ifeval) which ARE in the
+#                                    live composite. Saves ~50% bench wall.
+#   * BENCH_BATTERY_LITE=1         → alias for SHADOW_AXES=0 (friendlier).
+#
+# Default is `full battery` because Session 3 axes just started populating
+# for the first time today after the overwrite-bug fix (48b890d); we want
+# the data first, then decide whether to keep or kill. Flip to `0` for the
+# next round if bench signal is noisy/degenerate.
+BENCH_BATTERY_SHADOW_AXES = (
+    os.environ.get("BENCH_BATTERY_SHADOW_AXES", "1") != "0"
+    and os.environ.get("BENCH_BATTERY_LITE", "0") == "0"
+)
+
 # Session 2 per-round sample counts.
 BENCH_MATH_PER_ROUND = int(os.environ.get("BENCH_MATH_PER_ROUND", "8"))
 BENCH_CODE_PER_ROUND = int(os.environ.get("BENCH_CODE_PER_ROUND", "4"))
@@ -4089,25 +4109,39 @@ def run_bench_battery(model, tokenizer, device="cuda"):
         return {}
     t0 = time.time()
     out: dict[str, dict] = {}
-    _probes = (
-        # Session 2 — promoted 2026-04-24, ranking-live.
+    # Session 2 — promoted 2026-04-24, ranking-live (always runs when
+    # battery enabled).
+    _live_probes = (
         ("math_bench", math_bench_probe),
         ("code_bench", code_bench_probe),
         ("reasoning_bench", reasoning_bench_probe),
         ("knowledge_bench", knowledge_bench_probe),
         ("ifeval_bench", ifeval_bench_probe),
-        # Session 3 — shadow, promoted +48h.
+    )
+    # Session 3 — shadow, promoted +48h; skipped when
+    # ``BENCH_BATTERY_SHADOW_AXES=0`` for wall-time reasons (see
+    # 2026-04-24 distil-97 exchange with `leeroyjkin`). Leaves
+    # live axes populated so composite still scores correctly.
+    _shadow_probes = (
         ("aime_bench", aime_bench_probe),
         ("mbpp_bench", mbpp_bench_probe),
         ("tool_use_bench", tool_use_bench_probe),
         ("self_consistency_bench", self_consistency_bench_probe),
-        # Session 3.1 — shadow, commonsense science.
         ("arc_bench", arc_bench_probe),
-        # Session 3.4 — shadow, adversarial factuality (hallucination resistance).
         ("truthful_bench", truthful_bench_probe),
-        # Session 3.5 — shadow, procedural long-context needle-in-haystack.
         ("long_context_bench", long_context_bench_probe),
     )
+    _probes = _live_probes + (_shadow_probes if BENCH_BATTERY_SHADOW_AXES else ())
+    if not BENCH_BATTERY_SHADOW_AXES:
+        # Stamp skipped axes with a visible error string so compute_axes
+        # sees n=0 and drops them cleanly instead of registering as
+        # missing-data (which can trip teacher_sanity in edge cases).
+        for name, _fn in _shadow_probes:
+            out[name] = {
+                "error": "skipped: BENCH_BATTERY_SHADOW_AXES=0",
+                "n": 0, "correct": 0, "pass_frac": 0.0, "wall_s": 0.0,
+                "_skipped": True,
+            }
     for name, fn in _probes:
         st = time.time()
         try:
@@ -4117,6 +4151,7 @@ def run_bench_battery(model, tokenizer, device="cuda"):
         res["wall_s"] = round(time.time() - st, 1)
         out[name] = res
     out["_total_wall_s"] = round(time.time() - t0, 1)
+    out["_shadow_axes_enabled"] = BENCH_BATTERY_SHADOW_AXES
     return out
 
 

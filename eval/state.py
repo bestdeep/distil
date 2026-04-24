@@ -62,6 +62,13 @@ EVAL_PROGRESS_FILE = "eval_progress.json"
 CURRENT_ROUND_FILE = "current_round.json"
 TOP4_LEADERBOARD_FILE = "top4_leaderboard.json"
 H2H_TESTED_KING_FILE = "h2h_tested_against_king.json"
+# 2026-04-24 (distil-97, leeroyjkin): per-king consecutive-at-risk round
+# counter. Tracks how many recent rounds the current king's composite
+# ``worst`` axis has been below the floor or below the base model. Read
+# by API/dashboard (``king_health`` badge) and, once
+# ``KING_REGRESSION_GATE=1`` flips, used by results.py to force
+# dethronement. Shadow until we've observed ≥1 week of data.
+KING_REGRESSION_FILE = "king_regression_streak.json"
 ANNOUNCEMENT_FILE = "announcement.json"
 MODEL_HASHES_FILE = "model_hashes.json"
 SCORE_HISTORY_FILE = "score_history.json"
@@ -129,6 +136,11 @@ class ValidatorState:
         self.h2h_latest: dict = {}
         self.h2h_history: list[dict] = []
         self.h2h_tested_against_king: dict = {}
+        # King regression streak (2026-04-24): maps stringified king_uid →
+        # consecutive round counter of "at risk" composite (below floor
+        # OR worse than base model). Shadow telemetry for the
+        # leeroyjkin/distil-97 design discussion.
+        self.king_regression_streak: dict = {}
 
         # Model tracking
         self.model_score_history: dict = {}
@@ -164,6 +176,8 @@ class ValidatorState:
         raw_history = _load_json(self._path(H2H_HISTORY_FILE), [])
         self.h2h_history = raw_history if isinstance(raw_history, list) else []
         self.h2h_tested_against_king = _load_json(self._path(H2H_TESTED_KING_FILE), {})
+        raw_streak = _load_json(self._path(KING_REGRESSION_FILE), {})
+        self.king_regression_streak = raw_streak if isinstance(raw_streak, dict) else {}
 
         self.model_score_history = _load_json(self._path(MODEL_SCORE_HISTORY_FILE), {})
         raw_bad = _load_json(self._path(PERMANENTLY_BAD_FILE), [])
@@ -199,6 +213,7 @@ class ValidatorState:
         atomic_json_write(self._path(H2H_LATEST_FILE), self.h2h_latest, indent=2)
         atomic_json_write(self._path(H2H_HISTORY_FILE), self.h2h_history, indent=2)
         atomic_json_write(self._path(H2H_TESTED_KING_FILE), self.h2h_tested_against_king, indent=2)
+        atomic_json_write(self._path(KING_REGRESSION_FILE), self.king_regression_streak, indent=2)
 
     def save_model_tracking(self):
         """Persist model score history and permanently bad models."""

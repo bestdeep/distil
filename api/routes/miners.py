@@ -275,6 +275,18 @@ def get_miner(uid: int):
             "version": composite_entry.get("version"),
             "round_block": latest.get("block"),
         }
+        # King health (shadow telemetry, 2026-04-24). Only stamped on
+        # the king's row; surface alongside composite so the dashboard
+        # can render a "king at risk" badge when it's the current king.
+        kh = composite_entry.get("king_health")
+        if kh:
+            streak_file = _safe_json_load(
+                os.path.join(STATE_DIR, "king_regression_streak.json"), {}
+            )
+            result["king_health"] = {
+                **kh,
+                "streak": int(streak_file.get(str(uid), 0)),
+            }
     else:
         result["composite"] = None
 

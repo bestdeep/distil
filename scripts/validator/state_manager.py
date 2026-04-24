@@ -242,6 +242,52 @@ def update_h2h_state(state: ValidatorState, h2h_results, king_uid, winner_uid,
         atomic_json_write(state._path("h2h_tested_against_king.json"),
                           state.h2h_tested_against_king, indent=2)
 
+    # ── King regression streak (2026-04-24, SHADOW) ────────────────────
+    # leeroyjkin / distil-97: king camps the crown when it regresses on
+    # bench axes because the composite is only a veto, never a defense.
+    # Track consecutive "at risk" rounds (king.worst < floor OR <
+    # base model.worst). Purely telemetry today; flips to force
+    # dethronement once ``KING_REGRESSION_GATE=1`` after we have data.
+    # Only run on canonical rounds — a partial round's composite is
+    # meaningless for this check.
+    if round_is_canonical and effective_king_uid is not None:
+        try:
+            king_row = next(
+                (r for r in h2h_results if r.get("is_king")), None
+            )
+            health = ((king_row or {}).get("composite") or {}).get("king_health")
+            if health:
+                king_key = str(effective_king_uid)
+                at_risk = bool(health.get("at_risk"))
+                prev_streak = int(state.king_regression_streak.get(king_key, 0))
+                # Drop stale streaks for previous kings (keep only current
+                # king + the immediate predecessor for debugging).
+                state.king_regression_streak = {
+                    k: v for k, v in state.king_regression_streak.items()
+                    if k in (king_key, str(king_uid) if king_uid is not None else None)
+                }
+                if king_changed:
+                    prev_streak = 0  # fresh king, fresh slate
+                new_streak = prev_streak + 1 if at_risk else 0
+                state.king_regression_streak[king_key] = new_streak
+                if at_risk:
+                    logger.warning(
+                        f"🚨 King UID {effective_king_uid} at risk: "
+                        f"worst={health.get('king_worst'):.3f} "
+                        f"axis={health.get('king_worst_axis')} "
+                        f"(below_floor={health.get('below_floor')}, "
+                        f"worse_than_base={health.get('worse_than_base')}) — "
+                        f"streak={new_streak}/{health.get('min_streak')}"
+                    )
+                else:
+                    logger.info(
+                        f"King UID {effective_king_uid} healthy: "
+                        f"worst={health.get('king_worst'):.3f} "
+                        f"(floor={health.get('floor')}) — streak reset."
+                    )
+        except Exception as exc:
+            logger.warning(f"king_regression_streak update failed (non-fatal): {exc}")
+
 
 _COPY_LIKE_DQ_PATTERNS = (
     "activation-space duplicate",

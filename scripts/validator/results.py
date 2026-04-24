@@ -989,8 +989,16 @@ def process_results(results, models_to_eval, king_uid, state: ValidatorState, ui
         # fails open — same behaviour as before this commit.
         teacher_name = results.get("teacher")
         teacher_row = students_data.get(teacher_name) if teacher_name else None
-        annotate_h2h_with_composite(h2h_results, king_h2h_kl, students_data,
-                                    teacher_student_row=teacher_row)
+        # Import locally to keep composite.py ML-dep free (see its
+        # module docstring). The reference model is the always-in-round
+        # base student used for king_health telemetry (distil-97, 2026-04-24).
+        from eval.runtime import REFERENCE_MODEL as _REF_MODEL, REFERENCE_UID as _REF_UID
+        annotate_h2h_with_composite(
+            h2h_results, king_h2h_kl, students_data,
+            teacher_student_row=teacher_row,
+            reference_model=_REF_MODEL,
+            reference_uid=_REF_UID,
+        )
         # Backfill the vs_king string for entries that would have passed
         # the KL gate (``... dethroned``) but were blocked by the
         # composite-floor veto. Without this the dashboard would say

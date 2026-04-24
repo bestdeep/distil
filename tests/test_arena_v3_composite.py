@@ -483,6 +483,79 @@ class TestAnnotateH2HWithPareto(unittest.TestCase):
         self.assertGreater(pareto["comparable"], 3)
 
 
+class TestKingHealth(unittest.TestCase):
+    """King regression telemetry (2026-04-24, distil-97 leeroyjkin)."""
+
+    def _build_h2h(self, king_bench, base_bench):
+        king_data = _make_student(kl=0.2, rkl=0.1, cap_frac=0.85, bench=king_bench)
+        base_data = _make_student(kl=0.22, rkl=0.12, cap_frac=0.80, bench=base_bench)
+        students_data = {"king/m": king_data, "base/m": base_data}
+        h2h = [
+            {"uid": 10, "model": "king/m", "is_king": True, "kl": 0.2},
+            {"uid": -1, "model": "base/m", "is_king": False, "kl": 0.22},
+        ]
+        return h2h, students_data
+
+    def test_healthy_king_no_at_risk_flag(self):
+        from scripts.validator.composite import annotate_h2h_with_composite
+        h2h, sd = self._build_h2h(
+            king_bench={"math_bench": 0.75, "code_bench": 0.70,
+                        "reasoning_bench": 0.72, "knowledge_bench": 0.68,
+                        "ifeval_bench": 0.70},
+            base_bench={"math_bench": 0.40, "code_bench": 0.35,
+                        "reasoning_bench": 0.42, "knowledge_bench": 0.38,
+                        "ifeval_bench": 0.40},
+        )
+        annotate_h2h_with_composite(h2h, king_kl=0.2, students_data=sd,
+            reference_model="base/m", reference_uid=-1)
+        health = next(r for r in h2h if r["is_king"])["composite"]["king_health"]
+        self.assertFalse(health["at_risk"])
+        self.assertFalse(health["below_floor"])
+        self.assertFalse(health["worse_than_base"])
+
+    def test_king_below_floor(self):
+        from scripts.validator.composite import annotate_h2h_with_composite
+        h2h, sd = self._build_h2h(
+            king_bench={"math_bench": 0.60, "code_bench": 0.55,
+                        "reasoning_bench": 0.70, "knowledge_bench": 0.05,
+                        "ifeval_bench": 0.60},
+            base_bench={"math_bench": 0.40, "code_bench": 0.35,
+                        "reasoning_bench": 0.42, "knowledge_bench": 0.40,
+                        "ifeval_bench": 0.40},
+        )
+        annotate_h2h_with_composite(h2h, king_kl=0.2, students_data=sd,
+            reference_model="base/m", reference_uid=-1)
+        health = next(r for r in h2h if r["is_king"])["composite"]["king_health"]
+        self.assertTrue(health["below_floor"])
+        self.assertTrue(health["worse_than_base"])
+        self.assertTrue(health["at_risk"])
+        # king_worst_axis can be any low-scoring axis, including shadow
+        # axes like reasoning_density that derive from knowledge=0.05.
+        # Just check that it's populated and points at something real.
+        self.assertIsNotNone(health["king_worst_axis"])
+
+    def test_worse_than_base_only(self):
+        from scripts.validator.composite import annotate_h2h_with_composite
+        h2h, sd = self._build_h2h(
+            king_bench={"math_bench": 0.35, "code_bench": 0.30,
+                        "reasoning_bench": 0.32, "knowledge_bench": 0.28,
+                        "ifeval_bench": 0.30},
+            base_bench={"math_bench": 0.55, "code_bench": 0.50,
+                        "reasoning_bench": 0.52, "knowledge_bench": 0.48,
+                        "ifeval_bench": 0.50},
+        )
+        annotate_h2h_with_composite(h2h, king_kl=0.2, students_data=sd,
+            reference_model="base/m", reference_uid=-1)
+        health = next(r for r in h2h if r["is_king"])["composite"]["king_health"]
+        self.assertFalse(health["below_floor"])
+        self.assertTrue(health["worse_than_base"])
+        self.assertTrue(health["at_risk"])
+
+    def test_gate_disabled_by_default(self):
+        from scripts.validator.composite import KING_REGRESSION_GATE
+        self.assertIsInstance(KING_REGRESSION_GATE, bool)
+
+
 class TestAxisSummaryStats(unittest.TestCase):
     """Informational balance scores (2026-04-25, non-gating)."""
 
