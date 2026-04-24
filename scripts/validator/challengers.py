@@ -27,6 +27,18 @@ logger = logging.getLogger("distillation.remote_validator")
 DORMANT_ROTATION_N = int(os.environ.get("DORMANT_ROTATION_N", "2"))
 
 
+# 2026-04-24 (distil-97): evict H2H leaderboard contenders that fail precheck
+# repeatedly. Scenario we keep hitting: a miner submits a public model, wins
+# into the top-4 leaderboard, then privates the repo (restricted/gated on HF).
+# Validator can never re-verify it, the entry sits there as a ghost blocking
+# a real slot and spamming the TOP-CONTENDER REGRESSION CHECK warning every
+# round. UID 64 (sampleratez/3406940) has been stuck like this for 4+ rounds.
+# After this many consecutive precheck failures we drop the entry from the
+# persisted leaderboard. The counter resets the moment precheck passes again,
+# so transient HF blips (see 60317bb) don't evict anyone unfairly.
+LB_PRECHECK_EVICTION_STREAK = int(os.environ.get("LB_PRECHECK_EVICTION_STREAK", "3"))
+
+
 def select_challengers(valid_models, state: ValidatorState, king_uid, king_kl,
                        epoch_count: int, trust_king_kl: bool = True):
     """Pick challengers for the round.
@@ -234,26 +246,55 @@ def assert_top_contenders_present(challengers, valid_models, state: ValidatorSta
     """Regression guard: loud WARNING if any H2H leaderboard contender is absent from the
     eval round despite being a valid known model. Topaz's top-4 bug silently dropped
     genuine contenders for several rounds before being noticed — never again.
+
+    Also handles auto-eviction of ghost contenders that persistently fail precheck
+    (``LB_PRECHECK_EVICTION_STREAK``) — see module docstring for rationale.
     """
     lb_contenders = state.top4_leaderboard.get("contenders", []) or []
     if not lb_contenders:
         return
     missing = []
+    evicted = []
+    kept = []
     for entry in lb_contenders:
         uid = entry.get("uid")
         if uid is None or uid == king_uid:
-            continue
-        if uid in challengers:
+            kept.append(entry)
             continue
         in_valid = uid in valid_models
         model = (valid_models.get(uid) or {}).get("model") if in_valid else entry.get("model")
+        if uid in challengers or in_valid:
+            if entry.get("precheck_fail_streak"):
+                entry["precheck_fail_streak"] = 0
+            if uid in challengers:
+                kept.append(entry)
+                continue
+        if not in_valid:
+            entry["precheck_fail_streak"] = int(entry.get("precheck_fail_streak", 0)) + 1
+            if entry["precheck_fail_streak"] >= LB_PRECHECK_EVICTION_STREAK:
+                evicted.append({"uid": uid, "model": model,
+                                "streak": entry["precheck_fail_streak"]})
+                continue
         missing.append({
             "uid": uid,
             "model": model,
             "in_valid_models": in_valid,
             "in_bad_list": model in state.permanently_bad_models if model else None,
             "h2h_kl": entry.get("kl"),
+            "precheck_fail_streak": entry.get("precheck_fail_streak", 0),
         })
+        kept.append(entry)
+    if evicted:
+        state.top4_leaderboard["contenders"] = kept
+        try:
+            state.save_top4()
+        except Exception as exc:
+            logger.warning(f"failed to persist leaderboard after eviction: {exc}")
+        roster = ", ".join(f"UID {e['uid']} ({e['model']}, streak={e['streak']})" for e in evicted)
+        logger.warning(
+            f"🪦 Evicted {len(evicted)} ghost contender(s) from H2H leaderboard "
+            f"after {LB_PRECHECK_EVICTION_STREAK}+ consecutive precheck failures: {roster}"
+        )
     if missing:
         logger.warning(
             f"⚠️  TOP-CONTENDER REGRESSION CHECK: {len(missing)} H2H leaderboard "
@@ -261,8 +302,8 @@ def assert_top_contenders_present(challengers, valid_models, state: ValidatorSta
         )
     else:
         logger.info(
-            f"✅ top-contender check: all {len(lb_contenders)} H2H leaderboard "
-            f"contender(s) present in round"
+            f"✅ top-contender check: all {len(lb_contenders) - len(evicted)} H2H "
+            f"leaderboard contender(s) present in round"
         )
 
 
