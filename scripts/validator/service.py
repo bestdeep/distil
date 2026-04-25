@@ -475,12 +475,33 @@ def _run_resumed_round(subtensor, wallet, netuid, state, pod, resume_round,
                 uid,
             )
     models_to_eval = filtered_models
+    # In SINGLE_EVAL_MODE the king is NEVER seated in models_to_eval (the
+    # whole point of the policy is that the king is determined cross-round
+    # from stored composite scores, not re-paired against challengers each
+    # round). If the king isn't in models_to_eval AND we're in single-eval
+    # mode, that's expected — proceed with applying challenger results and
+    # let `apply_results_and_weights` resolve the king from composite_scores.
+    # Without this guard, every resumed single-eval round throws away
+    # ~90 min of evaluation by aborting here (regression observed
+    # 2026-04-25 18:26 UTC, lost the round that started 16:57 UTC).
     if king_uid is not None and king_uid not in models_to_eval:
-        logger.warning("Resume: king UID %s is no longer valid in this round; aborting apply", king_uid)
-        state.clear_round()
-        state.save_progress({"active": False, "failed": True, "failed_at": time.time(),
-                             "stage": "resume_king_invalid"})
-        return
+        try:
+            from scripts.validator import single_eval as _single_eval_mod
+            single_eval_active = bool(getattr(_single_eval_mod, "SINGLE_EVAL_MODE", False))
+        except Exception:
+            single_eval_active = bool(int(os.environ.get("SINGLE_EVAL_MODE", "0") or 0))
+        if single_eval_active:
+            logger.info(
+                "Resume: king UID %s correctly absent from models_to_eval "
+                "(single-eval mode — king is selected cross-round from composite_scores). "
+                "Proceeding with challenger result apply.", king_uid,
+            )
+        else:
+            logger.warning("Resume: king UID %s is no longer valid in this round; aborting apply", king_uid)
+            state.clear_round()
+            state.save_progress({"active": False, "failed": True, "failed_at": time.time(),
+                                 "stage": "resume_king_invalid"})
+            return
 
     king_kl = state.scores.get(str(king_uid), MAX_KL_THRESHOLD)
     challengers = {
