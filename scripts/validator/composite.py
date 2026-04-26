@@ -251,7 +251,13 @@ CHAT_TURNS_AXIS_WEIGHT = float(os.environ.get("CHAT_TURNS_AXIS_WEIGHT", "0.08"))
 CHAT_TURNS_AXIS_IN_COMPOSITE = (
     os.environ.get("CHAT_TURNS_AXIS_IN_COMPOSITE", "1") != "0"
 )
-CHAT_TURNS_MIN_VALID = int(os.environ.get("CHAT_TURNS_MIN_VALID", "3"))
+CHAT_TURNS_MIN_VALID = int(os.environ.get("CHAT_TURNS_MIN_VALID", "2"))
+# Judge-probe min-valid threshold. Default 4 lets it work with reduced
+# budgets (we currently run JUDGE_PROBE_PER_ROUND=6 for speed) without
+# silently dropping the axis. Bug-discovered 2026-04-26: the previous
+# hardcoded 8 was higher than the configured budget, so judge_probe
+# was always None in production.
+JUDGE_PROBE_MIN_VALID = int(os.environ.get("JUDGE_PROBE_MIN_VALID", "4"))
 
 # Per-axis minimum valid-item count below which the axis drops as
 # "insufficient sample". Small pools (code_bench samples only 4 items
@@ -442,12 +448,18 @@ def _axis_judge_probe(student: dict) -> float | None:
     """Teacher-as-judge normalized score in [0, 1]. 2026-04-23 shadow axis.
 
     Returns the ``normalized`` field from the eval script's judge probe
-    payload: teacher scores each of 16 rotated prompts on a 1-5 rubric,
-    valid scores are averaged, mapped via ``(mean - 1) / 4``. If too
-    many prompts failed to parse (``n_valid < 8``) we drop the axis —
-    that's a rubric/teacher drift signal and the telemetry is more
-    meaningful than a noisy score. ``None`` if the probe didn't run or
-    didn't report.
+    payload: teacher scores N rotated prompts on a 1-5 rubric, valid
+    scores are averaged, mapped via ``(mean - 1) / 4``. If too many
+    prompts failed to parse (``n_valid < JUDGE_PROBE_MIN_VALID``) we
+    drop the axis — that's a rubric/teacher drift signal and the
+    telemetry is more meaningful than a noisy score. ``None`` if the
+    probe didn't run or didn't report.
+
+    Bug fix 2026-04-26: the threshold was hardcoded to 8, but the
+    deployed config uses ``JUDGE_PROBE_PER_ROUND=6`` → max ``n_valid``
+    is 6 < 8 so the axis was silently dropped every round. Made the
+    threshold env-configurable with a default of 4 (half the legacy
+    16-prompt budget) so it scales with whatever budget is set.
     """
     jp = student.get("judge_probe") or {}
     if not jp:
@@ -455,7 +467,7 @@ def _axis_judge_probe(student: dict) -> float | None:
     norm = jp.get("normalized")
     if norm is None:
         return None
-    if (jp.get("n_valid") or 0) < 8:
+    if (jp.get("n_valid") or 0) < JUDGE_PROBE_MIN_VALID:
         return None
     return max(0.0, min(1.0, float(norm)))
 
