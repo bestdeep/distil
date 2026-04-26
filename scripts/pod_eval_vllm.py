@@ -1085,14 +1085,51 @@ def _parse_judge_score(text: str) -> int | None:
 # formatted, and in ``_format_transcript`` for chat_turns_probe. Both
 # probes share the same rubric shape, so the same patterns apply.
 _GRADER_INJECTION_PATTERNS = (
+    # 1. Literal rubric-end anchor "SCORE (just the digit):" — the
+    #    most dangerous prefix-prime because the teacher's decoder is
+    #    trained on completing exactly this phrase with a digit.
     re.compile(r"SCORE\s*\(?\s*just\s*the\s*digit\s*\)?", re.IGNORECASE),
-    re.compile(r"\bSCORE\s*[:=]\s*[1-5]\b", re.IGNORECASE),
-    re.compile(r"\bRating\s*[:=]\s*[1-5]\b", re.IGNORECASE),
-    re.compile(r"\bGrade\s*[:=]\s*[1-5]\b", re.IGNORECASE),
-    re.compile(r"\b[1-5]\s*=\s*(?:excellent|good|mediocre|poor|bad)\b",
+    # 2. Self-assigned scores with explicit separators
+    #       SCORE: 5     SCORE = 5     SCORE -> 5     SCORE → 5
+    #       SCORE | 5    SCORE => 5    Rating: five   Grade: 100
+    #    Number is ``\d+`` (catches multi-digit evasions like
+    #    ``SCORE: 55`` or ``SCORE: 100`` that an attacker might use to
+    #    bypass a strict ``[1-5]`` regex while still priming the
+    #    teacher to emit a digit ≥ 1) OR a written number word
+    #    one..ten (``SCORE: five``).
+    re.compile(
+        r"\b(?:SCORE|Rating|Grade|Mark)\s*"
+        r"(?:[:=\|]|->|=>|→)\s*"
+        r"(?:\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten)"
+        r"\b",
+        re.IGNORECASE,
+    ),
+    # 3. Self-assigned scores with natural-language separator —
+    #    only when followed by ``/N`` or ``out of N`` so we don't
+    #    false-positive on legitimate sports phrasing like "score of
+    #    3 to 1" or "rating is 5 stars".
+    re.compile(
+        r"\b(?:SCORE|Rating|Grade|Mark)\s+"
+        r"(?:of|is|equals?|=)\s*"
+        r"\d+\s*/\s*\d+\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:SCORE|Rating|Grade|Mark)\s+"
+        r"(?:of|is|equals?)\s+"
+        r"\d+\s*out\s*of\s*\d+\b",
+        re.IGNORECASE,
+    ),
+    # 4. Rubric scale phrases (``5 = excellent``, ``1 = bad``).
+    #    Allow ``[1-9]`` so an attacker who shifts the rubric to a
+    #    1-9 scale still gets caught.
+    re.compile(r"\b[1-9]\s*=\s*(?:excellent|good|mediocre|poor|bad)\b",
                re.IGNORECASE),
+    # 5. Rubric instruction ("Output ONLY the single digit").
     re.compile(r"Output\s+ONLY\s+the\s+single\s+digit", re.IGNORECASE),
+    # 6. Rubric persona.
     re.compile(r"\bstrict\s+grader\b", re.IGNORECASE),
+    # 7. Chat-turns transcript markers — block fake turn boundaries.
     re.compile(r"\b(?:USER|ASSISTANT)\s*\(\s*turn\s*\d+\s*\)\s*:",
                re.IGNORECASE),
 )
