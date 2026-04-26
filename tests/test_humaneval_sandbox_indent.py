@@ -96,5 +96,51 @@ class TestHumanEvalAutoIndent(unittest.TestCase):
         self.assertTrue(result.passed, f"multiline body should recover: {result.reason}")
 
 
+class TestHumanEvalProseStripping(unittest.TestCase):
+    """Goodhart hardening (2026-04-26 round 18): HumanEval-style prompts
+    must accept correctly-indented bodies wrapped in chat-style prose.
+    The model can produce a working completion but prefix it with
+    "Here's the body:" or append "Hope this helps!" — those must not
+    flip a real-skill signal into a SyntaxError.
+    """
+
+    BODY = "    return [x + 1 for x in l]\n"
+
+    def test_trailing_prose_stripped(self):
+        gen = self.BODY + "\nThat should do it!\n"
+        result = hs.run_sample(HE42_PROMPT, gen, HE42_TEST, "incr_list")
+        self.assertTrue(result.passed, f"trailing prose must recover: {result.reason}")
+
+    def test_leading_prose_stripped(self):
+        gen = "Here's the body:\n" + self.BODY
+        result = hs.run_sample(HE42_PROMPT, gen, HE42_TEST, "incr_list")
+        self.assertTrue(result.passed, f"leading prose must recover: {result.reason}")
+
+    def test_both_prose_sides_stripped(self):
+        gen = "Here's the body:\n" + self.BODY + "\nHope it helps!\n"
+        result = hs.run_sample(HE42_PROMPT, gen, HE42_TEST, "incr_list")
+        self.assertTrue(result.passed, f"both prose sides must recover: {result.reason}")
+
+    def test_trailing_stray_fence_with_prose(self):
+        """Round 18 fix for ``code\\n```\\nepilogue``: the closing fence
+        must be peeled off and the leading code preserved (not the
+        trailing prose). Older logic took the wrong side of the split."""
+        gen = self.BODY + "```\n\nLet me know!\n"
+        result = hs.run_sample(HE42_PROMPT, gen, HE42_TEST, "incr_list")
+        self.assertTrue(result.passed, f"stray closing fence must recover: {result.reason}")
+
+    def test_prose_recovery_does_not_promote_wrong_logic(self):
+        """Prose stripping must never make a wrong solution pass."""
+        bad = "    return [x + 2 for x in l]\n\nHope this helps!\n"
+        result = hs.run_sample(HE42_PROMPT, bad, HE42_TEST, "incr_list")
+        self.assertFalse(result.passed)
+        self.assertIn("AssertionError", result.reason)
+
+    def test_clean_body_unchanged(self):
+        """Baseline: clean body without prose still passes."""
+        result = hs.run_sample(HE42_PROMPT, self.BODY, HE42_TEST, "incr_list")
+        self.assertTrue(result.passed, f"clean body must pass: {result.reason}")
+
+
 if __name__ == "__main__":
     unittest.main()

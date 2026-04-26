@@ -330,6 +330,22 @@ _KING_SELECTION_MIN_AXES = 17
 #         to place teacher-high-prob tokens onto that trajectory — a
 #         direct attack on the highest-weight axis. v17+ rotates the
 #         seed via ``XOR(base_seed, block_seed)`` per round.
+#   v18 — MBPP+HumanEval prose-stripping. Pre-v18 the sandbox accepted
+#         the model generation almost-verbatim: ``_strip_code_fences``
+#         peeled markdown fences and an auto-indent path repaired bare
+#         unindented bodies, but a chatty model that wrapped a CORRECT
+#         solution in conversational prose ("Sure, here's the function:"
+#         / "Hope this helps!") tripped a SyntaxError instead of being
+#         graded on its code. Confirmed via synthetic repro and seen in
+#         real eval logs as IndentationError on Qwen-class HumanEval/13
+#         outputs. v18+ adds ``_find_parseable_gen_window`` which uses
+#         ``ast.parse`` to find the largest contiguous gen line range
+#         that, concatenated to the prompt, parses cleanly. Conservative
+#         (never invents code, never re-orders), so a wrong solution
+#         can't be promoted to a pass. Mixing v17 and v18 would let a
+#         model whose chatty wrapping was previously masked recover the
+#         earned-but-blocked passes — the king filter quarantines old
+#         records until they're regraded.
 # Mixing schema versions would let a stale-grader UID inherit the crown via
 # inflated/deflated axis scores. The selector therefore filters to v_current
 # first and only falls through to legacy records when no v_current candidate

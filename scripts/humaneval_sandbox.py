@@ -80,7 +80,26 @@ _RLIMIT_PREAMBLE = textwrap.dedent(f"""\
 
 
 def _strip_code_fences(text: str) -> str:
-    """Unwrap ```python ... ``` if the student emitted a fenced block.
+    r"""Unwrap a Markdown fenced Python block from a chat-style emission.
+
+    Handles three robust formats:
+
+    1. Prose intro + paired ``` fences + prose outro (regex captures
+       the inner body, drops both prose sides).
+    2. Just an opening fence (no closing) — drop the fence prefix,
+       keep the rest.
+    3. Just a closing fence — drop the fence and anything after it,
+       keep the code that came before it.
+
+    Round 18 (2026-04-26 Goodhart hardening) hardened this in two ways:
+    - Added the paired-fence regex so chatty models that wrap code in
+      ``Sure!\n\n```python ... ```\nDone!`` extract the inner body
+      cleanly. The older single-marker logic mishandled this case by
+      re-treating the closing fence as another opening fence.
+    - Disambiguated the single-marker fallback when both sides of the
+      split are non-empty: prefer the side that *precedes* a bare
+      ``\`\`\`\`\`\` `` (treated as a trailing fence + prose), since
+      the paired regex already handled the symmetric case.
 
     We only ``rstrip`` the result — leading indentation matters because
     many HumanEval prompts end mid-function-body (closing docstring at
@@ -89,6 +108,18 @@ def _strip_code_fences(text: str) -> str:
     if not text:
         return ""
     t = text
+
+    import re
+    paired = re.search(
+        r"```(?:python|py)?[^\S\n]*\n(.*?)\n[ \t]*```",
+        t,
+        re.DOTALL,
+    )
+    if paired:
+        body = paired.group(1)
+        if body.strip():
+            return body.rstrip()
+
     for marker in ("```python", "```py", "```"):
         if marker in t:
             parts = t.split(marker)
@@ -96,8 +127,102 @@ def _strip_code_fences(text: str) -> str:
                 t = parts[1]
                 break
             elif len(parts) == 2:
-                t = parts[0] if parts[1].strip() == "" else parts[1]
+                left, right = parts[0], parts[1]
+                if not right.strip():
+                    t = left
+                elif not left.strip():
+                    t = right
+                else:
+                    t = left
     return t.rstrip()
+
+
+def _find_parseable_gen_window(
+    prompt: str,
+    gen: str,
+    must_contain: str | None = None,
+) -> str:
+    """Find the largest contiguous line range of ``gen`` such that
+    ``prompt + connector + gen[range]`` parses cleanly with ``ast.parse``.
+
+    Goodhart hardening (2026-04-26 round 18): models occasionally wrap
+    correct code in chat-style prose ("Sure, here's the function:" /
+    "Hope this helps!"). When fed to the sandbox verbatim those
+    prefixes/suffixes raise ``SyntaxError`` instead of letting the test
+    harness exercise the actual function — confirmed in a synthetic
+    repro where logically-correct ``def is_sorted(...)`` failed because
+    of a leading "Sure! Here is..." line. That penalises real coding
+    skill on the basis of pedantic instruction-following (which we
+    already grade separately via ``ifeval_bench``), so it is a textbook
+    Goodhart vector.
+
+    Two modes:
+
+    * Empty ``prompt`` (MBPP): the gen contains a complete function
+      definition, possibly wrapped in prose. We look for the largest
+      contiguous parseable window that contains ``must_contain``
+      (e.g. ``def {entry_point}(``).
+
+    * Non-empty ``prompt`` (HumanEval): the prompt ends mid-function
+      body, so the gen alone cannot parse standalone. We look for the
+      largest window of ``gen`` that, when concatenated to ``prompt``,
+      produces a parseable program.
+
+    Conservative: never invents code or rearranges statements; only
+    trims prose at the outer boundary. If no parseable window exists,
+    the original gen is returned unchanged.
+    """
+    if not gen:
+        return gen
+    try:
+        import ast
+    except Exception:
+        return gen
+    connector = "" if (not prompt or prompt.endswith("\n")) else "\n"
+    full = prompt + connector + gen
+    try:
+        ast.parse(full)
+        if must_contain is None or must_contain in full:
+            return gen
+    except SyntaxError:
+        pass
+    except Exception:
+        return gen
+
+    lines = gen.splitlines(keepends=True)
+    n = len(lines)
+    best: tuple[int, int, int, str] | None = None
+    for start in range(n):
+        if not lines[start].strip():
+            continue
+        for end in range(n, start, -1):
+            truncated = "".join(lines[start:end])
+            candidate = prompt + connector + truncated
+            try:
+                ast.parse(candidate)
+            except SyntaxError:
+                continue
+            except Exception:
+                return gen
+            if must_contain is not None and must_contain not in candidate:
+                break
+            length = end - start
+            if best is None or length > best[2]:
+                best = (start, end, length, truncated)
+            break
+    if best is None:
+        return gen
+    return best[3]
+
+
+def _extract_python_block(text: str, must_contain: str | None = None) -> str:
+    """Backwards-compatible wrapper for the empty-prompt MBPP case.
+
+    Equivalent to ``_find_parseable_gen_window("", text, must_contain)``.
+    Kept as a separate name because the MBPP test suite imports it
+    directly and the empty-prompt semantics are conceptually distinct
+    from the HumanEval prose-trim."""
+    return _find_parseable_gen_window("", text, must_contain=must_contain)
 
 
 def _assemble_program(prompt: str, generation: str, test: str, entry_point: str,
@@ -125,9 +250,26 @@ def _assemble_program(prompt: str, generation: str, test: str, entry_point: str,
     when continuing a HumanEval prompt that ends mid-``def`` block, so
     the recovery only ever fixes a format mistake — it never changes a
     semantically valid program.
+
+    Prose-stripping (2026-04-26 round 18, both MBPP and HumanEval):
+    chatty models write things like "Sure! Here is the function:\\n
+    \\ndef foo():..." or "...\\n\\nHope this helps!" — both trip
+    ``SyntaxError`` even though the code is correct, again penalising
+    coding ability instead of measuring it. We run
+    ``_find_parseable_gen_window`` once before the auto-indent path
+    (HumanEval) and once for the empty-prompt path (MBPP) to drop
+    prose at the outer boundary while keeping the gen verbatim if it
+    already parses. The MBPP pass requires the entry-point ``def`` to
+    survive the trim; the HumanEval pass relies on ``prompt + gen``
+    parsing as a whole and is naturally guarded by the prompt's open
+    ``def`` block.
     """
     gen = _strip_code_fences(generation)
     def_marker = f"def {entry_point}("
+    if not prompt.strip() and entry_point:
+        gen = _find_parseable_gen_window(prompt, gen, must_contain=def_marker)
+    elif prompt.strip() and entry_point:
+        gen = _find_parseable_gen_window(prompt, gen)
     has_def_in_gen = gen.count(def_marker) > 0 and prompt.count(def_marker) >= 1
     if has_def_in_gen:
         idx = gen.find(def_marker)
