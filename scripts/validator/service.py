@@ -742,8 +742,25 @@ def apply_results_and_weights(
                     f"with cross-round composite king UID {composite_king_uid}"
                 )
             winner_uid = composite_king_uid
-            new_worst = (composite_record or {}).get("worst")
-            winner_kl = float(new_worst) if new_worst is not None else winner_kl
+            # Keep winner_kl as the global KL (state.scores entry) instead of
+            # composite-worst — the worst axis frequently bottoms at 0.0
+            # because miners haven't built mbpp/aime yet, which made every
+            # single-eval announcement read "KL: 0.000000" (impossible) and
+            # broke trust with miners (#distil-97, 2026-04-26 02:14 UTC).
+            # The dashboard already exposes composite scores separately, so
+            # the announcement KL should be the actual distillation distance.
+            winner_kl_global = state.scores.get(str(composite_king_uid))
+            if winner_kl_global is not None and winner_kl_global > 0:
+                winner_kl = float(winner_kl_global)
+            else:
+                # Fall back to composite weighted (≠ 0 in practice) before
+                # composite worst as a last-ditch placeholder.
+                weighted = (composite_record or {}).get("weighted")
+                worst = (composite_record or {}).get("worst")
+                if weighted is not None and float(weighted) > 0:
+                    winner_kl = float(weighted)
+                elif worst is not None:
+                    winner_kl = float(worst)
     if winner_uid is not None:
         _safe_set_weights(
             subtensor, wallet, netuid, n_uids,
