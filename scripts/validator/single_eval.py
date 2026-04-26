@@ -259,14 +259,29 @@ def _is_eligible_uid(
     return not is_disqualified(uid, hotkey, dq_reasons, commit_block=commit_block)
 
 
-# Records produced before Arena v3 promotion (n_axes=3: on_policy_rkl, kl,
-# capability) carry artificially high ``composite.worst`` because they
-# never had to pass AIME/MBPP/tool-use/etc — those axes simply weren't
-# scored. Mixing them into king selection lets a long-dormant 3-axis UID
-# leapfrog a current 20-axis incumbent whose worst sits at 0 because of
-# one hard axis. We require modern records to carry at least this many
-# axes to participate in king selection.
-_KING_SELECTION_MIN_AXES = 10
+# Records produced before the Arena v3 / v3.7 schema promotions carry
+# artificially high ``composite.worst`` because they never had to pass the
+# harder benches (AIME/MBPP/tool-use/self-consistency/arc/truthful/long-
+# context/procedural/robustness/noise-resistance — 10 of the 20 current
+# axes). Mixing legacy records into king selection lets a long-dormant
+# small-schema UID leapfrog a current full-schema incumbent whose worst
+# sits at 0 because of a hard axis they never had to face.
+#
+# Audit 2026-04-26 of state/composite_scores.json:
+#   n_axes=3:  32 records (legacy bootstrap, on_policy_rkl/kl/capability)
+#   n_axes=4:   8 records (legacy + 1 bench)
+#   n_axes=10: 30 records (Arena v2 cohort) — 60% have worst > 0 because
+#              they never faced the new bench axes
+#   n_axes=19: 28 records (current Arena v3.7 schema) — 0% have worst > 0
+#   n_axes=20:  8 records (Arena v3.7 + judge_probe / chat_turns_probe)
+#              also 0% have worst > 0
+#
+# Bumping the gate to 19 forces apples-to-apples king comparison: only
+# records from the same hardness regime compete. Legacy UIDs can re-enter
+# kingship by submitting a new on-chain commitment which triggers a fresh
+# full-schema eval. Records below the gate are still tracked, just not
+# eligible for kingship.
+_KING_SELECTION_MIN_AXES = 19
 
 
 def select_king_by_composite(
