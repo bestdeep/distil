@@ -807,19 +807,47 @@ def _pick_on_policy_rkl_prompts(block_seed):
 ON_POLICY_RKL_PROMPTS = list(ON_POLICY_RKL_POOL[:ON_POLICY_RKL_PER_ROUND])
 
 _ON_POLICY_RKL_BLOCK_SEED = None
+# Per-round derived sampling seed (Session 3.10 hardening, 2026-04-26).
+# Pre-3.10 we used a fixed ``ON_POLICY_RKL_SEED=42`` for every round.
+# Combined with the prompt-pool rotation that meant ``seed + p_idx`` was
+# the SAME across rounds for a given prompt — so a miner who knew the
+# pool could pre-compute their model's exact rollout (deterministic given
+# weights + sampling seed + prompt) and surgically train weights to
+# place teacher-high-prob tokens onto that exact sampled trajectory.
+# That's a *direct* attack on the highest-weight axis (on_policy_rkl is
+# composite-weighted higher than every benchmark axis). Rotating the
+# base seed per-block forces the sampler onto a different path each
+# round, defeating per-round-rollout overfitting while staying fully
+# deterministic across validators. Mirrors the prompt-pool rotation.
+ON_POLICY_RKL_DERIVED_SEED = ON_POLICY_RKL_SEED
 
 
 def set_on_policy_rkl_block_seed(block_seed):
-    """Regenerate ON_POLICY_RKL_PROMPTS deterministically for this round.
+    """Regenerate ON_POLICY_RKL_PROMPTS + sampling seed for this round.
 
     Call from main() right after ``set_capability_block_seed`` so both
-    axes rotate together on the same on-chain seed.
+    axes rotate together on the same on-chain seed. Also derives a
+    per-round sampling seed from the block_seed so the student's
+    rollout-sampling trajectory varies between rounds — see comment on
+    ``ON_POLICY_RKL_DERIVED_SEED`` for the Goodhart context.
     """
     global _ON_POLICY_RKL_BLOCK_SEED, ON_POLICY_RKL_PROMPTS
+    global ON_POLICY_RKL_DERIVED_SEED
     if block_seed is None or block_seed == _ON_POLICY_RKL_BLOCK_SEED:
         return
     _ON_POLICY_RKL_BLOCK_SEED = block_seed
     ON_POLICY_RKL_PROMPTS = _pick_on_policy_rkl_prompts(block_seed)
+    # Derive a per-round seed from block_seed so all validators agree
+    # but the rollout trajectory varies between rounds. We XOR the
+    # baseline ``ON_POLICY_RKL_SEED`` with the block_seed so an operator
+    # who explicitly sets ``ON_POLICY_RKL_SEED`` for local debugging
+    # still gets a reproducible-yet-rotated seed. 32-bit mask matches
+    # ``torch.manual_seed`` clamping.
+    try:
+        bs = int(block_seed) & 0xFFFFFFFF
+    except (TypeError, ValueError):
+        return
+    ON_POLICY_RKL_DERIVED_SEED = (int(ON_POLICY_RKL_SEED) ^ bs) & 0xFFFFFFFF
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -5668,7 +5696,12 @@ def on_policy_rollouts(student, tokenizer, device="cuda",
     top_k_logits = top_k_logits or ON_POLICY_RKL_TOP_K_LOGITS
     temperature = temperature or ON_POLICY_RKL_TEMPERATURE
     top_p = top_p or ON_POLICY_RKL_TOP_P
-    seed = seed or ON_POLICY_RKL_SEED
+    # Default to the per-block-derived seed so the sampling trajectory
+    # rotates between rounds (memorization defense, Session 3.10).
+    # Local-dev callers can pass ``seed=`` explicitly to pin a value for
+    # reproducibility; the env var ``ON_POLICY_RKL_SEED`` still
+    # contributes via XOR in ``set_on_policy_rkl_block_seed``.
+    seed = seed or ON_POLICY_RKL_DERIVED_SEED
 
     rollouts: list[dict] = []
     if student is None or tokenizer is None:

@@ -321,6 +321,15 @@ _KING_SELECTION_MIN_AXES = 17
 #         paraphrase perturbations (instruction_synonym, imperative_to_
 #         question) that mutate the problem text itself, with
 #         stratification guaranteeing at least one paraphrase per round.
+#   v17 — on_policy_rkl per-round seed rotation. Pre-v17 the student
+#         rollout-sampling seed was the constant ``ON_POLICY_RKL_SEED=42``
+#         for every round, so ``torch.manual_seed(42 + p_idx)`` was the
+#         SAME across rounds for every prompt position. A miner could
+#         pre-compute their model's exact rollout (deterministic given
+#         weights + sampling seed + prompt) and surgically train weights
+#         to place teacher-high-prob tokens onto that trajectory — a
+#         direct attack on the highest-weight axis. v17+ rotates the
+#         seed via ``XOR(base_seed, block_seed)`` per round.
 # Mixing schema versions would let a stale-grader UID inherit the crown via
 # inflated/deflated axis scores. The selector therefore filters to v_current
 # first and only falls through to legacy records when no v_current candidate
