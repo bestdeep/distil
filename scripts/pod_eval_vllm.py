@@ -3134,6 +3134,86 @@ def _coerce_block_seed(block_seed) -> int | None:
             return None
 
 
+def _shuffle_mc_options_for_round(item: dict, block_seed) -> dict:
+    """Per-round, per-question deterministic shuffle of MC option order.
+
+    Goodhart hardening (round 20): ARC and MMLU-Pro both ship with a fixed
+    "correct letter" per item. A miner who pre-trained on the public
+    ``allenai/ai2_arc`` and ``TIGER-Lab/MMLU-Pro`` datasets can build a
+    ``{question_text → correct_letter}`` lookup and saturate
+    ``arc_bench`` / ``knowledge_bench`` without parsing options. Round 18
+    logs caught this in the wild: 8 distinct miners scored
+    ``arc_bench=1.000`` while ``knowledge_bench`` was 0.0–0.25 — the
+    "perfect-score on the saturable axis, near-zero on the fresh-shuffle
+    axis" signature. (truthful_bench already shuffles at load time
+    per-question; that's enough to break "always answer A" but not
+    cross-round memorisation.)
+
+    The shuffle keys on ``(block_seed XOR sha256(question))`` so:
+      * Every validator with the same ``block_seed`` produces the same
+        shuffled item (cross-validator agreement preserved).
+      * The same question's correct letter rotates from round to round
+        (memorising ``{question → letter}`` is wrong on every refresh).
+      * Two items with different question text shuffle independently in
+        the same round (no global rotation pattern to learn).
+
+    Supports both the ARC-shape ``{labels, texts, gold_letter}`` and the
+    MMLU-shape ``{options, gold_letter}``. Items that don't match either
+    shape are returned unchanged so this helper is safe to call on every
+    sampled item regardless of the bench. Idempotent in the sense that
+    items without a coercible ``block_seed`` (e.g. dev/replay mode) are
+    returned unchanged — the bench then degrades to the legacy raw-letter
+    behaviour but still runs.
+    """
+    import hashlib as _hashlib
+    import random as _rnd
+
+    seed = _coerce_block_seed(block_seed)
+    if seed is None:
+        return item
+
+    if "labels" in item and "texts" in item:
+        labels = list(item["labels"])
+        texts = list(item["texts"])
+        try:
+            gold_idx = labels.index(item.get("gold_letter", ""))
+        except ValueError:
+            return item
+        if not labels or len(labels) != len(texts):
+            return item
+    elif "options" in item:
+        opts = list(item["options"])
+        labels = [chr(ord("A") + i) for i in range(len(opts))]
+        texts = list(opts)
+        try:
+            gold_idx = labels.index(item.get("gold_letter", ""))
+        except ValueError:
+            return item
+        if not labels:
+            return item
+    else:
+        return item
+
+    h = _hashlib.sha256(str(item.get("question", "")).encode()).digest()
+    mix = (seed ^ int.from_bytes(h[:8], "big")) & 0xFFFFFFFF
+    order = list(range(len(texts)))
+    _rnd.Random(mix).shuffle(order)
+
+    new_texts = [texts[i] for i in order]
+    new_labels = labels[: len(new_texts)]
+    new_gold_idx = order.index(gold_idx)
+    new_gold_letter = new_labels[new_gold_idx]
+
+    out = dict(item)
+    if "labels" in item and "texts" in item:
+        out["labels"] = new_labels
+        out["texts"] = new_texts
+    else:
+        out["options"] = new_texts
+    out["gold_letter"] = new_gold_letter
+    return out
+
+
 def _pick_bench_items(bench_key: str, block_seed, k: int) -> list[dict]:
     """Deterministic per-round sample from ``_BENCH_POOLS[bench_key]``.
 
@@ -3200,6 +3280,26 @@ def set_bench_block_seed(block_seed):
     )
     _BENCH_SAMPLES["arc"] = _pick_bench_items("arc", block_seed, BENCH_ARC_PER_ROUND)
     _BENCH_SAMPLES["truthful"] = _pick_bench_items("truthful", block_seed, BENCH_TRUTHFUL_PER_ROUND)
+    # Round 20 Goodhart hardening: ARC and MMLU-Pro ship with a fixed
+    # correct-letter per question; a miner who memorised the public
+    # datasets can answer "C" to question N every time without parsing.
+    # We rotate option order per (block_seed, question) so memorising
+    # {question → letter} is wrong on every refresh. Also re-applied to
+    # truthful_bench so its load-time per-question shuffle is now also
+    # round-rotated. Items without a recognisable MC shape pass through
+    # unchanged.
+    _BENCH_SAMPLES["arc"] = [
+        _shuffle_mc_options_for_round(it, block_seed)
+        for it in _BENCH_SAMPLES["arc"]
+    ]
+    _BENCH_SAMPLES["knowledge"] = [
+        _shuffle_mc_options_for_round(it, block_seed)
+        for it in _BENCH_SAMPLES["knowledge"]
+    ]
+    _BENCH_SAMPLES["truthful"] = [
+        _shuffle_mc_options_for_round(it, block_seed)
+        for it in _BENCH_SAMPLES["truthful"]
+    ]
     # Session 3.5: long-context needle is procedural — generate fresh items
     # per round from a seed mixed with the block_seed so pools rotate but
     # every validator generates the same items this round.

@@ -362,6 +362,20 @@ _KING_SELECTION_MIN_AXES = 17
 #         is to actually be capable. Mixing v18 and v19 records would
 #         let an old static-pool memoriser keep their inflated floor;
 #         the king filter quarantines old records until regraded.
+#   v20 — per-round MC option shuffle. Pre-v20 ``arc_bench`` and
+#         ``knowledge_bench`` (MMLU-Pro) used the raw dataset's
+#         correct-letter assignments, and ``truthful_bench`` only
+#         shuffled per-question at pool-load time. Round 18 logs
+#         caught the gaming clearly: 8 distinct miners scored
+#         ``arc_bench=1.000`` while their ``knowledge_bench`` sat at
+#         0.0–0.25, a textbook letter-memorisation signature. v20+
+#         re-shuffles MC options every round keyed on
+#         ``(block_seed, sha256(question))`` so the correct letter
+#         rotates each refresh; a memorised ``{question → letter}``
+#         lookup is wrong on every round. Mixing v19 and v20 records
+#         would let an old letter-memoriser keep their saturated
+#         arc_bench floor while honest miners regrade against the
+#         rotated mix; the king filter quarantines old records.
 # Mixing schema versions would let a stale-grader UID inherit the crown via
 # inflated/deflated axis scores. The selector therefore filters to v_current
 # first and only falls through to legacy records when no v_current candidate
